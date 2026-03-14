@@ -1,0 +1,32 @@
+[
+  {
+    "slide_id": 1,
+    "start_sec": 0.0,
+    "end_sec": 30.0,
+    "features": {"avg_speech_rate": 3.0, "silence_ratio": 0.12, "pitch_mean": 210.0, "energy_mean": -15.0, "filler_count": 1},
+    "change_points": [{"time_sec": 12.0, "type": "energy_drop", "magnitude": 1.2}],
+    "trend_label": "stable",
+    "anomaly_flags": [],
+    "fillers": [{"word": "음", "time_sec": 10.5}]
+  },
+  {
+    "slide_id": 2,
+    "start_sec": 30.0,
+    "end_sec": 60.0,
+    "features": {"avg_speech_rate": 2.1, "silence_ratio": 0.35, "pitch_mean": 180.0, "energy_mean": -22.0, "filler_count": 4},
+    "change_points": [{"time_sec": 44.0, "type": "speed_drop", "magnitude": 2.3}],
+    "trend_label": "decreasing_speed",
+    "anomaly_flags": ["speech_rate_per_sec_z>1.5"],
+    "fillers": [{"word": "어", "time_sec": 40.2}, {"word": "음", "time_sec": 45.8}]
+  },
+  {
+    "slide_id": 3,
+    "start_sec": 60.0,
+    "end_sec": 90.0,
+    "features": {"avg_speech_rate": 3.2, "silence_ratio": 0.08, "pitch_mean": 220.0, "energy_mean": -14.0, "filler_count": 0},
+    "change_points": [{"time_sec": 75.0, "type": "pitch_shift", "magnitude": 1.1}],
+    "trend_label": "increasing_speed",
+    "anomaly_flags": [],
+    "fillers": []
+  }
+]

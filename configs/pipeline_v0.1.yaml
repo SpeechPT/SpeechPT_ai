@@ -1,0 +1,43 @@
+version: 0.3.0
+coherence:
+  model_name: jhgan/ko-sroberta-multitask
+  threshold: 0.55
+  chunk_max_len: 120
+  visual:
+    enabled: false
+    ocr_engine: easyocr
+    ocr_languages: [ko, en]
+    min_confidence: 0.3
+    max_text_len: 80
+attitude:
+  audio:
+    sample_rate: 16000
+    hop_length: 512
+  pitch:
+    fmin: 50
+    fmax: 500
+  silence:
+    threshold_db: -40
+    min_duration_sec: 0.5
+  change_point:
+    algorithm: "pelt"
+    model: "rbf"
+    penalty: 3.0
+    merge_tolerance_sec: 2.0
+  scoring:
+    anomaly_z_threshold: 1.5
+    filler_patterns: ["음", "어", "그", "아", "그러니까", "뭐"]
+    trend_slope_eps: 0.001
+  wav2vec2:
+    model_name: "facebook/wav2vec2-base"
+    use_probe: false
+    chunk_duration_sec: 30
+stt:
+  enabled: false
+  backend: faster-whisper
+  model_name: small
+  language: ko
+  compute_type: int8
+  device: cpu
+report:
+  template: speechpt/report/templates/feedback_ko.yaml

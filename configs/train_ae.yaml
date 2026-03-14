@@ -1,0 +1,23 @@
+model:
+  backbone: facebook/wav2vec2-base
+  freeze_backbone: true
+  head_dims: [768, 256, 5]
+
+training:
+  loss: mse_plus_bce
+  chunk_duration_sec: 30
+  batch_search: [4, 8, 12, 16]
+  early_stopping_patience: 3
+
+labels:
+  - speech_rate
+  - silence_ratio
+  - energy_drop
+  - pitch_shift
+  - overall_delivery
+
+data:
+  split: [0.8, 0.1, 0.1]
+  min_sessions: 300
+  target_sessions: 1000
+  kappa_threshold: 0.75

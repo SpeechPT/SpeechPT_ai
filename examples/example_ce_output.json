@@ -1,0 +1,26 @@
+[
+  {
+    "slide_id": 1,
+    "coverage": 0.82,
+    "missed_keypoints": ["리스크"],
+    "evidence_spans": [
+      {"keypoint": "소개", "transcript_chunk": "소개 목표", "similarity": 0.76}
+    ]
+  },
+  {
+    "slide_id": 2,
+    "coverage": 0.62,
+    "missed_keypoints": ["데이터 수집"],
+    "evidence_spans": [
+      {"keypoint": "모델 구조", "transcript_chunk": "모델" , "similarity": 0.61}
+    ]
+  },
+  {
+    "slide_id": 3,
+    "coverage": 0.55,
+    "missed_keypoints": ["결론"],
+    "evidence_spans": [
+      {"keypoint": "정리", "transcript_chunk": "정리", "similarity": 0.58}
+    ]
+  }
+]

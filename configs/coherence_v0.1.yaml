@@ -1,0 +1,10 @@
+model_name: jhgan/ko-sroberta-multitask
+threshold: 0.55
+chunk_max_len: 120
+textrank_top_k: 3
+visual:
+  enabled: false
+  ocr_engine: easyocr
+  ocr_languages: [ko, en]
+  min_confidence: 0.3
+  max_text_len: 80

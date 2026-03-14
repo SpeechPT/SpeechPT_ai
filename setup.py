@@ -1,0 +1,30 @@
+from setuptools import find_packages, setup
+
+setup(
+    name="speechpt-engine",
+    version="0.1.0",
+    description="Multimodal presentation coaching engines (coherence & attitude)",
+    author="SpeechPT Team",
+    packages=find_packages(include=["speechpt", "speechpt.*"]),
+    python_requires=">=3.10",
+    install_requires=[
+        "sentence-transformers>=2.2.0",
+        "transformers>=4.30.0",
+        "torch>=2.0.0",
+        "librosa>=0.10.0",
+        "ruptures>=1.1.0",
+        "kss>=4.0.0",
+        "kiwipiepy>=0.14.0",
+        "python-pptx>=0.6.21",
+        "pymupdf>=1.22.0",
+        "pyyaml>=6.0",
+        "numpy>=1.24.0",
+        "scikit-learn>=1.2.0",
+        "faster-whisper>=1.0.3",
+        "peft>=0.13.0",
+        "datasets>=2.20.0",
+        "accelerate>=0.34.0",
+        "easyocr>=1.7.1",
+        "opencv-python-headless>=4.9.0.80",
+    ],
+)

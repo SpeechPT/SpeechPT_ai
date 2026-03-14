@@ -1,0 +1,26 @@
+audio:
+  sample_rate: 16000
+  hop_length: 512
+
+pitch:
+  fmin: 50
+  fmax: 500
+
+silence:
+  threshold_db: -40
+  min_duration_sec: 0.5
+
+change_point:
+  algorithm: "pelt"
+  model: "rbf"
+  penalty: 3.0
+  merge_tolerance_sec: 2.0
+
+scoring:
+  anomaly_z_threshold: 1.5
+  filler_patterns: ["음", "어", "그", "아", "그러니까", "뭐"]
+
+wav2vec2:
+  model_name: "facebook/wav2vec2-base"
+  use_probe: false
+  chunk_duration_sec: 30

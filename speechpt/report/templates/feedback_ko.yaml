@@ -1,0 +1,100 @@
+issue_templates:
+  - id: content_gap_high
+    issue: content_gap
+    severity: high
+    text: "슬라이드 {slide_id}에서 핵심 포인트 {missed}가 빠졌습니다. 다음 번에는 해당 내용을 명확히 언급하세요."
+  - id: content_gap_mid
+    issue: content_gap
+    severity: medium
+    text: "슬라이드 {slide_id} 일부 키포인트({missed})가 약하게 다뤄졌어요. 시간을 조금 더 할애해 주세요."
+  - id: content_gap_low
+    issue: content_gap
+    severity: low
+    text: "슬라이드 {slide_id}에서 {missed} 언급이 짧았습니다. 보완하면 완성도가 올라갑니다."
+  - id: visual_not_explained
+    issue: visual_not_explained
+    severity: medium
+    text: "슬라이드 {slide_id}의 시각자료 핵심({visual_missed}) 설명이 부족합니다. 차트/이미지 의미를 한 문장으로 명확히 설명하세요."
+  - id: coverage_good
+    issue: coverage_good
+    severity: low
+    text: "슬라이드 {slide_id}는 자료와 발화가 잘 맞았습니다. 현재 흐름을 유지하세요."
+
+  - id: speed_drop
+    issue: speed_drop
+    severity: medium
+    text: "슬라이드 {slide_id} 구간에서 말속도가 눈에 띄게 느려졌습니다( {rate_change} ). 리듬을 일정하게 유지해 보세요."
+  - id: speed_rise
+    issue: speed_rise
+    severity: medium
+    text: "슬라이드 {slide_id}에서 속도가 급해졌습니다( {rate_change} ). 핵심 문장은 한 템포씩 끊어주세요."
+  - id: pacing_stable
+    issue: pacing_stable
+    severity: low
+    text: "슬라이드 {slide_id}의 속도는 안정적입니다. 현재 템포를 유지하세요."
+  - id: pacing_inconsistent
+    issue: pacing_inconsistent
+    severity: medium
+    text: "슬라이드 {slide_id}에서 속도 기복이 큽니다(CV={rate_change}). 호흡 포인트를 미리 잡아 균형을 맞춰보세요."
+
+  - id: silence_excess
+    issue: silence_excess
+    severity: low
+    text: "슬라이드 {slide_id}에서 침묵 비율이 높습니다( {silence_duration} ). 전환 멘트를 추가해 끊김을 줄여보세요."
+  - id: silence_good
+    issue: silence_good
+    severity: low
+    text: "적절한 멈춤이 있어 이해를 돕습니다. 이 리듬을 유지하세요."
+
+  - id: energy_drop
+    issue: energy_drop
+    severity: medium
+    text: "슬라이드 {slide_id}에서 에너지가 떨어집니다. 목소리 볼륨과 억양을 살짝 올려주세요."
+  - id: energy_rise
+    issue: energy_rise
+    severity: low
+    text: "에너지가 높아 청중의 주의를 끌었습니다. 다음 슬라이드에서도 균형 있게 유지하세요."
+
+  - id: pitch_shift
+    issue: pitch_shift
+    severity: low
+    text: "슬라이드 {slide_id}에서 음 높이 변화가 큽니다. 감정 전달엔 좋지만 과도하면 산만할 수 있어요."
+
+  - id: filler_many
+    issue: filler_many
+    severity: medium
+    text: "슬라이드 {slide_id}에서 추임새가 잦았습니다(총 {filler_count}회). 말하기 전에 짧은 침묵으로 대체해보세요."
+  - id: filler_few
+    issue: filler_few
+    severity: low
+    text: "추임새 사용이 적절합니다. 자연스러운 흐름을 유지하세요."
+
+  - id: change_point_dense
+    issue: change_point_dense
+    severity: medium
+    text: "슬라이드 {slide_id} 구간에 변화점이 많아( {cp_count}회 ) 흐름이 다소 끊깁니다. 핵심 전환만 강조하세요."
+  - id: change_point_smooth
+    issue: change_point_smooth
+    severity: low
+    text: "변화점 분포가 안정적입니다. 현재 전환 템포를 유지하세요."
+
+  - id: overall_strong
+    issue: overall_strong
+    severity: low
+    text: "전체적으로 자료 커버리지가 높고 전달이 안정적입니다. 현재 방식을 유지하세요."
+  - id: overall_mixed
+    issue: overall_mixed
+    severity: medium
+    text: "커버리지는 양호하지만 전달 안정성이 다소 흔들립니다. 속도와 침묵 비율을 조정해보세요."
+  - id: overall_weak
+    issue: overall_weak
+    severity: high
+    text: "자료 커버리지와 전달 모두 개선 여지가 큽니다. 누락된 포인트와 속도/에너지를 우선 보완하세요."
+
+summary_templates:
+  - id: summary_high
+    text: "발표가 자료와 잘 맞으며 전달도 안정적입니다. 작은 디테일을 다듬으면 더욱 설득력 있는 발표가 됩니다."
+  - id: summary_mid
+    text: "핵심은 전달되지만 일부 슬라이드에서 속도나 침묵이 흔들립니다. 전환부 연습을 추천합니다."
+  - id: summary_low
+    text: "여러 슬라이드에서 커버리지와 전달이 모두 부족합니다. 스크립트와 호흡 계획을 다시 정리해보세요."

@@ -1,0 +1,25 @@
+model:
+  candidates:
+    - klue/roberta-base
+    - jhgan/ko-sroberta-multitask
+  max_length: 256
+
+training:
+  method: lora
+  lora:
+    r: 16
+    alpha: 32
+    dropout: 0.05
+  task: binary_or_contrastive
+  batch_search: [16, 24, 32, 48, 64, 96]
+  early_stopping_patience: 3
+
+data:
+  split: [0.8, 0.1, 0.1]
+  min_sessions: 300
+  target_sessions: 1000
+
+tracking:
+  log_seed: true
+  save_top_k: 1
+  save_previous: true

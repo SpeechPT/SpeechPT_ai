@@ -1,0 +1,5 @@
+[
+  {"slide_id": 1, "gold_coverage": 0.85, "gold_missed": ["리스크"], "pred_coverage": 0.82, "pred_missed": ["리스크"]},
+  {"slide_id": 2, "gold_coverage": 0.70, "gold_missed": ["데이터 수집"], "pred_coverage": 0.62, "pred_missed": ["데이터 수집"]},
+  {"slide_id": 3, "gold_coverage": 0.60, "gold_missed": ["결론"], "pred_coverage": 0.55, "pred_missed": ["결론"]}
+]
