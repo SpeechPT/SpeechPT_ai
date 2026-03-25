@@ -101,6 +101,81 @@ python -m speechpt.training.ae_probe_train \
   --output artifacts/ae_model
 ```
 
+## SageMaker: AE preprocess in cloud (no local full download)
+```bash
+python3 submit_ae_preprocessing.py
+```
+
+기본 입력/출력:
+- labels: `s3://aws-s3-speechpt1/datasets/raws/Training/02.라벨링데이터/`
+- audio: `s3://aws-s3-speechpt1/datasets/raws/Training/01.원천데이터/`
+- processed output: `s3://aws-s3-speechpt1/datasets/processed/ae/full/`
+
+전처리 결과는 `all.jsonl` + `train/valid/test.jsonl`을 생성합니다.
+
+## AE Best Practice (recommended)
+1. 전처리 전체는 **한 번만** 실행해서 `full/all.jsonl` 생성
+2. 학습은 `all.jsonl`에서 부분집합을 뽑아 반복
+
+부분집합 생성 예시:
+```bash
+python3 -m speechpt.training.make_ae_subset \
+  --input /abs/path/all.jsonl \
+  --output-dir /abs/path/ae_subset_10k \
+  --max-rows 10000
+```
+
+그 뒤 subset `train/valid`만 S3에 올리고 학습:
+```bash
+AE_INPUT_S3=s3://aws-s3-speechpt1/datasets/processed/ae/exp-10k/ \
+AE_INSTANCE_TYPE=ml.g5.xlarge \
+python3 submit_ae_training.py
+```
+
+추가학습(resume) 예시:
+```bash
+AE_INPUT_S3=s3://aws-s3-speechpt1/datasets/processed/ae/exp-30k/ \
+AE_INSTANCE_TYPE=ml.g5.xlarge \
+python3 submit_ae_training.py
+```
+
+`submit_ae_training.py`는 동일 `checkpoint_s3_uri`를 사용하면 자동으로 최신 체크포인트를 복원합니다.
+필요하면 `AE_RESUME_FROM=/opt/ml/checkpoints/ae_probe_best.pt`로 명시할 수 있습니다.
+
+## SageMaker: AE end-to-end (preprocess -> train)
+```bash
+python3 submit_ae_end_to_end.py
+```
+
+## Prepare AE dataset (csv/json/jsonl -> train/valid/test jsonl)
+```bash
+python -m speechpt.training.prepare_ae_dataset \
+  --input /abs/path/ae_raw.csv \
+  --output-dir /abs/path/ae_prepared \
+  --audio-root /abs/path/audio
+```
+
+출력 파일:
+- `/abs/path/ae_prepared/train.jsonl`
+- `/abs/path/ae_prepared/valid.jsonl`
+- `/abs/path/ae_prepared/test.jsonl`
+
+SageMaker 채널(`SM_CHANNEL_TRAINING`)에 `train.jsonl`, `valid.jsonl`을 넣으면
+`ae_probe_train.py`는 `--train/--valid` 없이도 자동으로 파일을 찾습니다.
+단일 파일(`manifest.jsonl`/`data.jsonl`)만 있으면 자동 분할해서 학습합니다.
+
+## Prepare AE dataset from SpeechPT raws (label json + wav)
+```bash
+python -m speechpt.training.prepare_ae_from_raws \
+  --label-dir /abs/path/02.라벨링데이터 \
+  --audio-dir /abs/path/01.원천데이터 \
+  --output-dir /abs/path/ae_prepared
+```
+
+주의:
+- 이 스크립트는 raw 메타 + 음성 신호 기반으로 학습 타깃을 휴리스틱 생성합니다.
+- 정답 점수가 별도로 있으면 그 값을 우선 사용하세요.
+
 ## Evaluate
 ```bash
 python eval/eval_coherence.py \
