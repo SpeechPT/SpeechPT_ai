@@ -20,6 +20,7 @@ import wave
 from pathlib import Path
 from typing import Dict, List
 
+import librosa
 import numpy as np
 
 
@@ -78,10 +79,20 @@ def derive_audio_targets(audio_path: Path) -> Dict[str, float]:
         slope = 0.0
     energy_drop = 1 if slope < -0.02 else 0
 
-    signs = np.sign(frames)
-    zc = np.mean(np.abs(np.diff(signs, axis=1)) > 0, axis=1)
-    zc_std = float(np.std(zc))
-    pitch_shift = 1 if zc_std > 0.08 else 0
+    # pyin으로 실제 기본 주파수(F0) 추출 → voiced 구간 F0 표준편차로 억양 변화 판정
+    # zero-crossing 방식 대비 훨씬 정확하며 한국어 발화 분포에 맞는 임계값 사용
+    try:
+        y_float = np.array(y, dtype=np.float32)
+        f0, voiced_flag, _ = librosa.pyin(
+            y_float,
+            fmin=librosa.note_to_hz("C2"),  # 65 Hz
+            fmax=librosa.note_to_hz("C7"),  # 2093 Hz
+            sr=sr,
+        )
+        f0_voiced = f0[voiced_flag & ~np.isnan(f0)]
+        pitch_shift = 1 if (len(f0_voiced) > 10 and float(np.std(f0_voiced)) > 80.0) else 0
+    except Exception:
+        pitch_shift = 0
 
     return {
         "silence_ratio": max(0.0, min(1.0, silence_ratio)),
@@ -129,17 +140,36 @@ def row_from_label(
     audio_index: Dict[str, Path] | None = None,
     use_audio_features: bool = True,
 ) -> Dict | None:
+    row, _ = row_from_label_with_reason(
+        label_file=label_file,
+        audio_dir=audio_dir,
+        audio_path_mode=audio_path_mode,
+        audio_path_prefix=audio_path_prefix,
+        audio_index=audio_index,
+        use_audio_features=use_audio_features,
+    )
+    return row
+
+
+def row_from_label_with_reason(
+    label_file: Path,
+    audio_dir: Path,
+    audio_path_mode: str,
+    audio_path_prefix: str,
+    audio_index: Dict[str, Path] | None = None,
+    use_audio_features: bool = True,
+) -> tuple[Dict | None, str]:
     try:
         text = label_file.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return None
-    except OSError:
-        return None
+        return None, "read_file_not_found"
+    except OSError as e:
+        return None, f"read_os_error:{type(e).__name__}"
 
     try:
         obj = json.loads(text)
     except json.JSONDecodeError:
-        return None
+        return None, "json_decode_error"
     answer = obj.get("dataSet", {}).get("answer", {})
     word_count = safe_float(answer.get("raw", {}).get("wordCount"), 0.0)
     duration_ms = safe_float(obj.get("rawDataInfo", {}).get("answer", {}).get("duration"), 0.0)
@@ -179,7 +209,7 @@ def row_from_label(
         "energy_drop": int(audio_targets["energy_drop"]),
         "pitch_shift": int(audio_targets["pitch_shift"]),
         "overall_delivery": float(overall_delivery),
-    }
+    }, "ok"
 
 
 def write_jsonl(path: Path, rows: List[Dict]) -> None:
@@ -201,6 +231,7 @@ def main():
     parser.add_argument("--audio-path-prefix", default="audio")
     parser.add_argument("--use-audio-features", choices=["true", "false"], default="true")
     args = parser.parse_args()
+    use_audio_features = args.use_audio_features.lower() == "true"
 
     test_ratio = 1.0 - args.train_ratio - args.valid_ratio
     if args.train_ratio <= 0 or args.valid_ratio <= 0 or test_ratio <= 0:
@@ -211,7 +242,7 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    label_files = sorted(label_dir.glob("*.json"))
+    label_files = sorted(label_dir.rglob("*.json"))
     if args.max_files > 0:
         label_files = label_files[: args.max_files]
     if not label_files:
@@ -275,4 +306,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    use_audio_features = args.use_audio_features.lower() == "true"

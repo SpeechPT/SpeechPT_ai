@@ -101,6 +101,25 @@ python -m speechpt.training.ae_probe_train \
   --output artifacts/ae_model
 ```
 
+## AE Inference (wav -> 5 scores)
+학습된 `ae_probe.pt`를 사용해 다음 점수를 출력합니다:
+`speech_rate`, `silence_ratio`, `energy_drop`, `pitch_shift`, `overall_delivery`
+
+로컬 모델 디렉터리 사용:
+```bash
+python -m speechpt.training.ae_probe_infer \
+  --audio /abs/path/sample.wav \
+  --model-dir /abs/path/ae_model
+```
+
+S3 모델 아티팩트(`model.tar.gz`)를 바로 사용:
+```bash
+python -m speechpt.training.ae_probe_infer \
+  --audio /abs/path/sample.wav \
+  --model-dir /tmp/ae_model \
+  --model-artifact-s3 s3://aws-s3-speechpt1/models/ae/v1/speechpt-ae-train-v1-20260326-083416/output/model.tar.gz
+```
+
 ## SageMaker: AE preprocess in cloud (no local full download)
 ```bash
 python3 submit_ae_preprocessing.py

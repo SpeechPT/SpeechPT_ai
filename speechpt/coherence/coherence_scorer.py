@@ -19,6 +19,14 @@ from .transcript_aligner import TranscriptSegment
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
+_model_cache: Dict[str, SentenceTransformer] = {}
+
+
+def _get_model(model_name: str) -> SentenceTransformer:
+    if model_name not in _model_cache:
+        _model_cache[model_name] = SentenceTransformer(model_name)
+    return _model_cache[model_name]
+
 
 @dataclass
 class SlideCoherenceResult:
@@ -60,7 +68,7 @@ def score_slide(
             evidence_spans=[],
         )
 
-    model = SentenceTransformer(model_name)
+    model = _get_model(model_name)
     kp_texts = [kp.text for kp in keypoints]
     kp_importance = np.array([kp.importance for kp in keypoints], dtype=float)
     kp_emb = model.encode(kp_texts, convert_to_numpy=True, normalize_embeddings=True)

@@ -13,6 +13,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
 
+import io
+
+import boto3
 import librosa
 import torch
 import torch.nn as nn
@@ -39,12 +42,27 @@ class AudioDataset(Dataset):
         chunk_sec: float,
         base_dir: Path | None = None,
         audio_dir: Path | None = None,
+        audio_index: Dict[str, Path] | None = None,
+        audio_s3_uri: str = "",
     ):
         self.rows = rows
         self.sample_rate = sample_rate
         self.chunk_len = int(sample_rate * chunk_sec)
         self.base_dir = Path(base_dir) if base_dir is not None else None
         self.audio_dir = Path(audio_dir) if audio_dir is not None else None
+        self._basename_cache: Dict[str, Path] = {}
+        self._audio_index = audio_index or {}
+        self._warn_count = 0
+        # S3 직접 스트리밍용 — FastFile 한글 경로 FUSE 버그 우회
+        self._audio_s3_uri = audio_s3_uri.rstrip("/") + "/" if audio_s3_uri else ""
+        if self._audio_s3_uri.startswith("s3://"):
+            body = self._audio_s3_uri[5:]
+            self._s3_bucket, _, prefix = body.partition("/")
+            self._s3_prefix = prefix
+        else:
+            self._s3_bucket = ""
+            self._s3_prefix = ""
+        self._s3_client = boto3.client("s3") if self._s3_bucket else None
 
     def __len__(self):
         return len(self.rows)
@@ -55,8 +73,37 @@ class AudioDataset(Dataset):
             row.audio_path,
             base_dir=self.base_dir,
             audio_dir=self.audio_dir,
+            basename_cache=self._basename_cache,
+            audio_index=self._audio_index,
         )
-        wav, _ = librosa.load(audio_path, sr=self.sample_rate)
+        try:
+            wav, _ = librosa.load(str(audio_path), sr=self.sample_rate)
+        except Exception as local_exc:
+            # FastFile + 한글 S3 prefix 조합에서 FUSE read가 실패하는 경우
+            # boto3로 S3에서 직접 스트리밍해 우회한다.
+            wav = None
+            if self._s3_client is not None:
+                s3_key = self._s3_prefix + Path(audio_path).name
+                try:
+                    obj = self._s3_client.get_object(Bucket=self._s3_bucket, Key=s3_key)
+                    audio_bytes = io.BytesIO(obj["Body"].read())
+                    wav, _ = librosa.load(audio_bytes, sr=self.sample_rate)
+                except Exception as s3_exc:
+                    if self._warn_count < 30:
+                        print(json.dumps({
+                            "warning": "audio_load_failed",
+                            "path": str(audio_path),
+                            "s3_key": s3_key,
+                            "local_error": str(local_exc),
+                            "s3_error": str(s3_exc),
+                        }))
+                    self._warn_count += 1
+                    return None
+            else:
+                if self._warn_count < 30:
+                    print(json.dumps({"warning": "audio_load_failed", "path": str(audio_path), "error": str(local_exc)}))
+                self._warn_count += 1
+                return None
         if len(wav) >= self.chunk_len:
             wav = wav[: self.chunk_len]
         else:
@@ -69,14 +116,29 @@ class AudioDataset(Dataset):
         return wav, target
 
 
+def collate_skip_none(batch):
+    """Collate function that drops samples where __getitem__ returned None.
+
+    Returns None when the entire batch is empty so callers can skip it.
+    """
+    batch = [b for b in batch if b is not None]
+    if not batch:
+        return None
+    wavs = torch.stack([torch.from_numpy(b[0]) for b in batch])
+    targets = torch.stack([b[1] for b in batch])
+    return wavs, targets
+
+
 class AEProbe(nn.Module):
-    def __init__(self):
+    def __init__(self, in_dim: int = 768, dropout: float = 0.1):
         super().__init__()
-        self.fc1 = nn.Linear(768, 256)
+        self.fc1 = nn.Linear(in_dim, 256)
+        self.drop = nn.Dropout(dropout)
         self.fc2 = nn.Linear(256, 5)
 
     def forward(self, x):
         x = F.relu(self.fc1(x))
+        x = self.drop(x)
         return self.fc2(x)
 
 
@@ -157,7 +219,41 @@ def resolve_data_paths(args) -> tuple[Path, Path]:
     )
 
 
-def resolve_audio_path(raw_path: str, base_dir: Path | None, audio_dir: Path | None) -> Path:
+def build_s3_audio_index(audio_s3_uri: str, audio_dir: Path) -> Dict[str, Path]:
+    """FastFile 모드에서 디렉토리 리스팅이 불가능할 때 S3 오브젝트 목록으로 인덱스 구축.
+
+    S3 오브젝트 키에서 상대 경로를 추출하고 FastFile 마운트 경로와 조합해
+    {basename: local_path} 매핑을 반환한다.
+    """
+    if not audio_s3_uri.startswith("s3://"):
+        return {}
+    body = audio_s3_uri[5:]
+    bucket, _, prefix = body.partition("/")
+    prefix = prefix.rstrip("/") + "/"
+
+    s3 = boto3.client("s3")
+    paginator = s3.get_paginator("list_objects_v2")
+    index: Dict[str, Path] = {}
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for item in page.get("Contents", []):
+            key = item["Key"]
+            if not key.lower().endswith(".wav"):
+                continue
+            rel_path = key[len(prefix):]
+            local_path = audio_dir / rel_path
+            index.setdefault(Path(rel_path).name, local_path)
+
+    print(json.dumps({"s3_audio_index_built": len(index), "audio_s3_uri": audio_s3_uri}, ensure_ascii=False))
+    return index
+
+
+def resolve_audio_path(
+    raw_path: str,
+    base_dir: Path | None,
+    audio_dir: Path | None,
+    basename_cache: Dict[str, Path] | None = None,
+    audio_index: Dict[str, Path] | None = None,
+) -> Path:
     audio_path = Path(raw_path)
     if audio_path.is_absolute():
         return audio_path
@@ -165,8 +261,23 @@ def resolve_audio_path(raw_path: str, base_dir: Path | None, audio_dir: Path | N
     if audio_dir is not None:
         text = raw_path.strip()
         if text.startswith("audio/"):
-            return audio_dir / text[len("audio/") :]
-        return audio_dir / text
+            text = text[len("audio/") :]
+        candidate = audio_dir / text
+        if candidate.exists():
+            return candidate
+
+        # Fallback: some manifests contain only basename while files live under nested dirs.
+        base_name = Path(text).name
+        if audio_index is not None and base_name in audio_index:
+            return audio_index[base_name]
+        if basename_cache is not None and base_name in basename_cache:
+            return basename_cache[base_name]
+        matches = list(audio_dir.rglob(base_name))
+        if matches:
+            if basename_cache is not None:
+                basename_cache[base_name] = matches[0]
+            return matches[0]
+        return candidate
 
     if base_dir is not None:
         return base_dir / audio_path
@@ -176,7 +287,11 @@ def resolve_audio_path(raw_path: str, base_dir: Path | None, audio_dir: Path | N
 def train_epoch(loader, processor, backbone, probe, optimizer, device):
     probe.train()
     total_loss = 0.0
-    for wavs, targets in loader:
+    n_batches = 0
+    for batch in loader:
+        if batch is None:
+            continue
+        wavs, targets = batch
         targets = targets.to(device)
         inputs = processor(list(wavs.numpy()), sampling_rate=16000, return_tensors="pt", padding=True).to(device)
         with torch.no_grad():
@@ -194,14 +309,19 @@ def train_epoch(loader, processor, backbone, probe, optimizer, device):
         loss.backward()
         optimizer.step()
         total_loss += float(loss.item())
-    return total_loss / max(1, len(loader))
+        n_batches += 1
+    return total_loss / max(1, n_batches)
 
 
 def eval_epoch(loader, processor, backbone, probe, device):
     probe.eval()
     total_loss = 0.0
+    n_batches = 0
     with torch.no_grad():
-        for wavs, targets in loader:
+        for batch in loader:
+            if batch is None:
+                continue
+            wavs, targets = batch
             targets = targets.to(device)
             inputs = processor(list(wavs.numpy()), sampling_rate=16000, return_tensors="pt", padding=True).to(device)
             hidden = backbone(**inputs).last_hidden_state
@@ -213,7 +333,8 @@ def eval_epoch(loader, processor, backbone, probe, device):
             cls_true = targets[:, [2, 3]]
             loss = F.mse_loss(reg_pred, reg_true) + F.binary_cross_entropy_with_logits(cls_pred, cls_true)
             total_loss += float(loss.item())
-    return total_loss / max(1, len(loader))
+            n_batches += 1
+    return total_loss / max(1, n_batches)
 
 
 def load_training_state(probe: nn.Module, optimizer: torch.optim.Optimizer, path: Path, device: torch.device):
@@ -240,6 +361,7 @@ def main():
     parser.add_argument("--checkpoint-dir", default=os.environ.get("SM_CHECKPOINT_DIR"))
     parser.add_argument("--resume-from")
     parser.add_argument("--audio-dir", default=os.environ.get("SM_CHANNEL_AUDIO"))
+    parser.add_argument("--audio-s3", default=os.environ.get("AE_AUDIO_S3", ""))
     parser.add_argument("--model", default="facebook/wav2vec2-base")
     parser.add_argument("--sample-rate", type=int, default=16000)
     parser.add_argument("--chunk-sec", type=float, default=30)
@@ -248,6 +370,7 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--split-ratio", type=float, default=0.9)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--num-workers", type=int, default=2)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -258,13 +381,32 @@ def main():
     valid_rows = read_jsonl(valid_path)
     base_dir = train_path.parent
     audio_dir = Path(args.audio_dir) if args.audio_dir else None
-    print(json.dumps({"audio_dir": str(audio_dir) if audio_dir else None}, ensure_ascii=False))
+    audio_index: Dict[str, Path] = {}
+    if audio_dir is not None and audio_dir.exists():
+        for p in audio_dir.rglob("*.wav"):
+            audio_index.setdefault(p.name, p)
+    print(
+        json.dumps(
+            {
+                "audio_dir": str(audio_dir) if audio_dir else None,
+                "audio_indexed_files": len(audio_index),
+            },
+            ensure_ascii=False,
+        )
+    )
+    # FastFile 모드는 디렉토리 리스팅을 지원하지 않아 rglob이 0개를 반환한다.
+    # 이 경우 S3 오브젝트 목록을 직접 조회해 FastFile 접근 경로를 역산한다.
+    if len(audio_index) == 0 and args.audio_s3 and audio_dir is not None:
+        print(json.dumps({"message": "audio_index_empty_building_from_s3", "audio_s3": args.audio_s3}, ensure_ascii=False))
+        audio_index = build_s3_audio_index(args.audio_s3, audio_dir)
     train_ds = AudioDataset(
         train_rows,
         sample_rate=args.sample_rate,
         chunk_sec=args.chunk_sec,
         base_dir=base_dir,
         audio_dir=audio_dir,
+        audio_index=audio_index,
+        audio_s3_uri=args.audio_s3,
     )
     valid_ds = AudioDataset(
         valid_rows,
@@ -272,10 +414,26 @@ def main():
         chunk_sec=args.chunk_sec,
         base_dir=base_dir,
         audio_dir=audio_dir,
+        audio_index=audio_index,
+        audio_s3_uri=args.audio_s3,
     )
 
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
-    valid_loader = DataLoader(valid_ds, batch_size=args.batch_size, shuffle=False)
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=args.batch_size,
+        shuffle=True,
+        collate_fn=collate_skip_none,
+        num_workers=args.num_workers,
+        persistent_workers=args.num_workers > 0,
+    )
+    valid_loader = DataLoader(
+        valid_ds,
+        batch_size=args.batch_size,
+        shuffle=False,
+        collate_fn=collate_skip_none,
+        num_workers=args.num_workers,
+        persistent_workers=args.num_workers > 0,
+    )
 
     processor = Wav2Vec2Processor.from_pretrained(args.model)
     backbone = Wav2Vec2Model.from_pretrained(args.model).to(device)
@@ -283,7 +441,9 @@ def main():
     for p in backbone.parameters():
         p.requires_grad = False
 
-    probe = AEProbe().to(device)
+    in_dim = int(getattr(backbone.config, "hidden_size", 768))
+    print(json.dumps({"probe_input_dim": in_dim}, ensure_ascii=False))
+    probe = AEProbe(in_dim=in_dim).to(device)
     optimizer = torch.optim.Adam(probe.parameters(), lr=args.lr)
 
     start_epoch = 1
@@ -342,7 +502,10 @@ def main():
                 }
                 torch.save(best_state, checkpoint_dir / "ae_probe_best.pt")
 
-    torch.save({"model": args.model, "sample_rate": args.sample_rate, "chunk_sec": args.chunk_sec}, Path(args.output) / "meta.pt")
+    torch.save(
+        {"model": args.model, "sample_rate": args.sample_rate, "chunk_sec": args.chunk_sec, "dropout": 0.1},
+        Path(args.output) / "meta.pt",
+    )
 
 
 if __name__ == "__main__":
