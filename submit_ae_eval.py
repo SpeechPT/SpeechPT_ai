@@ -8,13 +8,13 @@ from sagemaker.pytorch import PyTorch
 
 role = "arn:aws:iam::242071452299:role/SpeechPT-SageMaker-Role"
 bucket = "aws-s3-speechpt1"
-input_s3 = os.environ.get("AE_INPUT_S3", f"s3://{bucket}/datasets/processed/ae/strict-10k-v2/")
+input_s3 = os.environ.get("AE_INPUT_S3", f"s3://{bucket}/datasets/processed/ae/audio-v2/")
 audio_s3 = os.environ.get("AE_AUDIO_S3", f"s3://{bucket}/datasets/raws/Training/01.원천데이터/")
 model_artifact_s3 = os.environ.get(
     "AE_MODEL_ARTIFACT_S3",
-    f"s3://{bucket}/models/ae/v1/speechpt-ae-train-v1-20260326-083416/output/model.tar.gz",
+    f"s3://{bucket}/models/ae/v1/speechpt-ae-train-v1-20260403-104158/output/model.tar.gz",
 )
-backbone_model = os.environ.get("AE_MODEL", "facebook/wav2vec2-base")
+backbone_model = os.environ.get("AE_MODEL", "kresnik/wav2vec2-large-xlsr-korean")
 job_name = os.environ.get("AE_EVAL_JOB_NAME", f"speechpt-ae-eval-v1-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}")
 instance_type = os.environ.get("AE_EVAL_INSTANCE_TYPE", "ml.g5.xlarge")
 input_mode = os.environ.get("AE_EVAL_INPUT_MODE", "FastFile")
@@ -40,6 +40,7 @@ estimator = PyTorch(
         "chunk-sec": 20,
         "batch-size": 2,
         "max-test-samples": max_test_samples,
+        "audio-s3": audio_s3,
     },
     sagemaker_session=session,
 )

@@ -63,8 +63,9 @@ def main():
     parser = argparse.ArgumentParser(description="Compare AE finetuned vs base(random probe) on test set")
     parser.add_argument("--input-dir", default="/opt/ml/input/data/training")
     parser.add_argument("--audio-dir", default="/opt/ml/input/data/audio")
-    parser.add_argument("--model", default="facebook/wav2vec2-base")
+    parser.add_argument("--model", default="kresnik/wav2vec2-large-xlsr-korean")
     parser.add_argument("--model-artifact-s3-uri", required=True)
+    parser.add_argument("--audio-s3", default="", help="S3 URI for audio fallback (e.g. s3://bucket/prefix/)")
     parser.add_argument("--sample-rate", type=int, default=16000)
     parser.add_argument("--chunk-sec", type=float, default=20)
     parser.add_argument("--batch-size", type=int, default=2)
@@ -94,6 +95,7 @@ def main():
         base_dir=test_path.parent,
         audio_dir=audio_dir,
         audio_index=audio_index,
+        audio_s3_uri=args.audio_s3,
     )
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False, collate_fn=collate_skip_none)
 
