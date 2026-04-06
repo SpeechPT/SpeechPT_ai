@@ -105,6 +105,11 @@ python -m speechpt.training.ae_probe_train \
 학습된 `ae_probe.pt`를 사용해 다음 점수를 출력합니다:
 `speech_rate`, `silence_ratio`, `energy_drop`, `pitch_shift`, `overall_delivery`
 
+**최신 학습된 모델 아티팩트:**
+```
+s3://aws-s3-speechpt1/models/ae/v1/speechpt-ae-train-v1-20260403-104158/output/model.tar.gz
+```
+
 로컬 모델 디렉터리 사용:
 ```bash
 python -m speechpt.training.ae_probe_infer \
@@ -112,16 +117,51 @@ python -m speechpt.training.ae_probe_infer \
   --model-dir /abs/path/ae_model
 ```
 
-S3 모델 아티팩트(`model.tar.gz`)를 바로 사용:
+S3 모델 아티팩트(`model.tar.gz`)를 바로 사용 (자동 다운로드):
 ```bash
 python -m speechpt.training.ae_probe_infer \
   --audio /abs/path/sample.wav \
   --model-dir /tmp/ae_model \
-  --model-artifact-s3 s3://aws-s3-speechpt1/models/ae/v1/speechpt-ae-train-v1-20260326-083416/output/model.tar.gz
+  --model-artifact-s3 s3://aws-s3-speechpt1/models/ae/v1/speechpt-ae-train-v1-20260403-104158/output/model.tar.gz
+```
+
+슬라이드 섹션별 점수 (슬라이드1=0~40s, 슬라이드2=40~90s, ...):
+```bash
+python -m speechpt.training.ae_probe_infer \
+  --audio /abs/path/sample.wav \
+  --model-dir /tmp/ae_model \
+  --model-artifact-s3 s3://aws-s3-speechpt1/models/ae/v1/speechpt-ae-train-v1-20260403-104158/output/model.tar.gz \
+  --slide-timestamps 0,40,90,130
+```
+
+## Filler Word Detection (간투사 탐지)
+STT 출력에서 "어", "음", "그", "저" 등 간투사를 탐지하고 슬라이드 섹션별로 집계합니다.
+
+```python
+from speechpt.attitude.filler_detector import detect_fillers
+
+words = [
+    {"word": "안녕하세요", "start": 0.0, "end": 0.4},
+    {"word": "어", "start": 1.2, "end": 1.4},
+    {"word": "오늘", "start": 1.5, "end": 1.8},
+]
+
+result = detect_fillers(words, slide_timestamps=[0, 40, 90])
+# result: {total_fillers, filler_rate, filler_words, per_slide}
 ```
 
 ## SageMaker: AE preprocess in cloud (no local full download)
+
+> 전처리는 S3에서 직접 스트리밍하므로 로컬에 131GB 다운로드 불필요.
+
 ```bash
+python3 submit_ae_preprocessing.py
+```
+
+환경변수로 커스터마이즈:
+```bash
+AE_PREP_INSTANCE_TYPE=ml.c5.4xlarge \
+AE_PREP_VOLUME_SIZE_GB=100 \
 python3 submit_ae_preprocessing.py
 ```
 
@@ -151,15 +191,25 @@ AE_INSTANCE_TYPE=ml.g5.xlarge \
 python3 submit_ae_training.py
 ```
 
-추가학습(resume) 예시:
+파인튜닝(fine-tune) — 기존 학습된 모델에서 이어서 학습:
 ```bash
 AE_INPUT_S3=s3://aws-s3-speechpt1/datasets/processed/ae/exp-30k/ \
-AE_INSTANCE_TYPE=ml.g5.xlarge \
+AE_RESUME_FROM=s3://aws-s3-speechpt1/models/ae/v1/speechpt-ae-train-v1-20260403-104158/output/model.tar.gz \
+AE_EPOCHS=5 \
+AE_LR=3e-4 \
 python3 submit_ae_training.py
 ```
 
+> `AE_RESUME_FROM`에 S3 model.tar.gz URI를 지정하면 해당 체크포인트에서 가중치를 복원한 뒤 학습을 이어갑니다.
+
 `submit_ae_training.py`는 동일 `checkpoint_s3_uri`를 사용하면 자동으로 최신 체크포인트를 복원합니다.
-필요하면 `AE_RESUME_FROM=/opt/ml/checkpoints/ae_probe_best.pt`로 명시할 수 있습니다.
+
+## SageMaker: AE evaluate
+```bash
+AE_INPUT_S3=s3://aws-s3-speechpt1/datasets/processed/ae/full/ \
+AE_MODEL_S3=s3://aws-s3-speechpt1/models/ae/v1/speechpt-ae-train-v1-20260403-104158/output/model.tar.gz \
+python3 submit_ae_eval.py
+```
 
 ## SageMaker: AE end-to-end (preprocess -> train)
 ```bash
