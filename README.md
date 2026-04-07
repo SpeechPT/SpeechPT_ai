@@ -2,48 +2,288 @@
 
 SpeechPT AI Engine은 발표 문서(PPT/PDF)와 음성을 함께 분석해 코칭 리포트를 생성합니다.
 
-## What it does
-- CE(Coherence Engine): 슬라이드 핵심 내용과 발화 정합성 분석
-- AE(Attitude Engine): 속도, 침묵, 에너지, 변화점 기반 전달 품질 분석
-- Report Engine: 슬라이드별 이슈, 전체 점수, 피드백 리포트 생성
+---
 
-## Output scores
-- `content_coverage`
-- `delivery_stability`
-- `pacing_score`
+## 목차
+1. [프로젝트 구조](#프로젝트-구조)
+2. [사전 준비 (처음 한 번만)](#사전-준비-처음-한-번만)
+3. [S3 / 모델 경로 레퍼런스](#s3--모델-경로-레퍼런스)
+4. [AE 학습 파이프라인](#ae-학습-파이프라인)
+   - [Step 1. 전처리](#step-1-전처리)
+   - [Step 2. 학습](#step-2-학습)
+   - [Step 3. 평가](#step-3-평가)
+   - [Step 4. 잡 상태 확인](#step-4-잡-상태-확인)
+5. [파인튜닝 (기존 모델에서 이어서)](#파인튜닝-기존-모델에서-이어서)
+6. [추론 (모델로 점수 뽑기)](#추론-모델로-점수-뽑기)
+7. [엔진 파이프라인 실행](#엔진-파이프라인-실행)
 
-## Project structure
-- `speechpt/coherence`: 문서 파싱, 키포인트 추출, 전사 정렬, CE 스코어링
-- `speechpt/attitude`: 오디오 피처, 변화점, AE 스코어링, wav2vec2 임베딩
-- `speechpt/stt`: Whisper 기반 STT 연동
-- `speechpt/report`: 통합 리포트 생성
-- `speechpt/training`: CE LoRA / AE probe 학습 스크립트
-- `eval`: 평가 및 어블레이션
-- `configs`: 파이프라인/학습 설정
+---
 
-## Setup
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+## 프로젝트 구조
+
+```
+speechpt/
+├── coherence/       CE: 슬라이드 내용 ↔ 발화 정합성 분석
+├── attitude/        AE: 음성 전달력 분석 (속도/침묵/에너지/억양/간투사)
+├── stt/             Whisper 기반 STT
+├── report/          통합 리포트 생성
+└── training/        AE 학습/평가/추론 스크립트
+
+submit_ae_preprocessing.py   전처리 잡 SageMaker 제출
+submit_ae_training.py        학습 잡 SageMaker 제출
+submit_ae_eval.py            평가 잡 SageMaker 제출
 ```
 
-## Run tests
+**AE 출력 점수 5개:**
+| 점수 | 설명 |
+|------|------|
+| `speech_rate` | 발화 속도 |
+| `silence_ratio` | 침묵 비율 |
+| `energy_drop` | 에너지 하락 여부 (0/1) |
+| `pitch_shift` | 억양 변화 여부 (0/1) |
+| `overall_delivery` | 종합 전달력 |
+
+---
+
+## 사전 준비 (처음 한 번만)
+
+### 1. AWS CLI 설정
 ```bash
-python -m pytest tests
+aws configure
+# AWS Access Key ID, Secret Access Key, Region: ap-northeast-2 입력
 ```
 
-## Run pipeline (manual STT JSON)
+### 2. Python 환경
+```bash
+# Python 3.10+ 필요
+pip install sagemaker boto3 torch transformers librosa
+```
+
+> SageMaker 잡은 로컬에서 코드를 실행하지 않고 AWS 클라우드에 제출만 함.
+> GPU나 대용량 데이터를 로컬에 받을 필요 없음.
+
+### 3. 레포 클론
+```bash
+git clone https://github.com/SpeechPT/SpeechPT_ai.git
+cd SpeechPT_ai
+```
+
+---
+
+## S3 / 모델 경로 레퍼런스
+
+| 용도 | S3 경로 |
+|------|---------|
+| Raw 라벨 JSON | `s3://aws-s3-speechpt1/datasets/raws/Training/02.라벨링데이터/` |
+| Raw 오디오 WAV | `s3://aws-s3-speechpt1/datasets/raws/Training/01.원천데이터/` |
+| 전처리 결과 (최신) | `s3://aws-s3-speechpt1/datasets/processed/ae/audio-v3/` |
+| **현재 최신 모델** | `s3://aws-s3-speechpt1/models/ae/v1/speechpt-ae-train-v1-20260407-090927/output/model.tar.gz` |
+| 전체 모델 목록 | `s3://aws-s3-speechpt1/models/ae/v1/` |
+| 체크포인트 | `s3://aws-s3-speechpt1/checkpoints/ae/v1/` |
+
+> 학습된 모델은 모두 S3에 저장됨. 로컬에 없어도 S3 URI로 바로 사용 가능.
+
+S3 모델 목록 확인:
+```bash
+aws s3 ls s3://aws-s3-speechpt1/models/ae/v1/
+```
+
+---
+
+## AE 학습 파이프라인
+
+### Step 1. 전처리
+
+> 데이터가 바뀌었을 때만 실행. 이미 완료된 `audio-v3`가 있으면 스킵 가능.
+
+```bash
+# 기본 실행
+/usr/local/bin/python3 submit_ae_preprocessing.py
+```
+
+커스터마이즈 (환경변수로 설정):
+```bash
+AE_PREP_OUTPUT_S3=s3://aws-s3-speechpt1/datasets/processed/ae/audio-v4/ \
+AE_PREP_MAX_FILES=20000 \
+AE_PREP_INSTANCE_TYPE=ml.c5.4xlarge \
+AE_PREP_VOLUME_SIZE_GB=100 \
+/usr/local/bin/python3 submit_ae_preprocessing.py
+```
+
+완료 확인:
+```bash
+aws s3 ls s3://aws-s3-speechpt1/datasets/processed/ae/audio-v3/
+# train.jsonl / valid.jsonl / test.jsonl 세 파일이 있으면 완료
+```
+
+---
+
+### Step 2. 학습
+
+```bash
+# 기본 실행 (audio-v3 데이터, kresnik 한국어 모델, 10 epochs)
+AE_INPUT_S3=s3://aws-s3-speechpt1/datasets/processed/ae/audio-v3/ \
+/usr/local/bin/python3 submit_ae_training.py
+```
+
+커스터마이즈:
+```bash
+AE_INPUT_S3=s3://aws-s3-speechpt1/datasets/processed/ae/audio-v3/ \
+AE_EPOCHS=15 \
+AE_LR=1e-3 \
+AE_BATCH_SIZE=8 \
+AE_INSTANCE_TYPE=ml.g5.xlarge \
+/usr/local/bin/python3 submit_ae_training.py
+```
+
+**주요 환경변수:**
+| 변수 | 기본값 | 설명 |
+|------|--------|------|
+| `AE_INPUT_S3` | `datasets/processed/ae/` | 전처리된 JSONL 위치 |
+| `AE_MODEL` | `kresnik/wav2vec2-large-xlsr-korean` | 백본 모델 (변경 금지) |
+| `AE_EPOCHS` | `10` | 학습 epoch 수 |
+| `AE_LR` | `1e-3` | learning rate |
+| `AE_BATCH_SIZE` | `8` | 배치 크기 |
+| `AE_INSTANCE_TYPE` | `ml.g5.xlarge` | GPU 인스턴스 |
+
+학습이 완료되면 모델이 자동으로 S3에 저장됨:
+```
+s3://aws-s3-speechpt1/models/ae/v1/<job-name>/output/model.tar.gz
+```
+
+job-name 확인:
+```bash
+/usr/local/bin/python3 -c "
+import boto3
+sm = boto3.client('sagemaker', region_name='ap-northeast-2')
+for j in sm.list_training_jobs(SortBy='CreationTime', SortOrder='Descending', MaxResults=5)['TrainingJobSummaries']:
+    print(j['TrainingJobName'], '|', j['TrainingJobStatus'])
+"
+```
+
+---
+
+### Step 3. 평가
+
+학습 완료 후 바로 실행:
+```bash
+AE_MODEL_ARTIFACT_S3=s3://aws-s3-speechpt1/models/ae/v1/<job-name>/output/model.tar.gz \
+AE_INPUT_S3=s3://aws-s3-speechpt1/datasets/processed/ae/audio-v3/ \
+AE_EVAL_WAIT=false \
+/usr/local/bin/python3 submit_ae_eval.py
+```
+
+결과 확인 (완료 후):
+```bash
+/usr/local/bin/python3 -c "
+import boto3, tarfile, json
+from pathlib import Path
+
+# eval job name으로 교체
+EVAL_JOB = 'speechpt-ae-eval-v1-XXXXXXXX-XXXXXX'
+
+s3 = boto3.client('s3', region_name='ap-northeast-2')
+out = Path('/tmp/ae_eval_result')
+out.mkdir(exist_ok=True)
+tar = out / 'model.tar.gz'
+s3.download_file('aws-s3-speechpt1', f'models/ae-eval/v1/{EVAL_JOB}/output/model.tar.gz', str(tar))
+with tarfile.open(tar, 'r:gz') as tf:
+    tf.extractall(out)
+print(json.loads((out / 'eval_result.json').read_text()))
+"
+```
+
+결과 예시:
+```json
+{
+  "num_test_rows": 653,
+  "base_loss": 1.6794,
+  "finetuned_loss": 0.3668,
+  "improvement_abs": 1.3126,
+  "improvement_pct": 78.16
+}
+```
+
+---
+
+### Step 4. 잡 상태 확인
+
+```bash
+# 최근 잡 목록
+/usr/local/bin/python3 -c "
+import boto3
+sm = boto3.client('sagemaker', region_name='ap-northeast-2')
+for j in sm.list_training_jobs(SortBy='CreationTime', SortOrder='Descending', MaxResults=10)['TrainingJobSummaries']:
+    print(j['TrainingJobName'], '|', j['TrainingJobStatus'])
+"
+
+# CloudWatch 실시간 로그
+aws logs tail /aws/sagemaker/TrainingJobs \
+  --log-stream-name-prefix <job-name> \
+  --follow
+```
+
+**잡 상태 의미:**
+| 상태 | 의미 |
+|------|------|
+| `Starting` | 인스턴스 부팅 중 (5~10분) |
+| `Downloading` | 코드/데이터 준비 중 |
+| `Training` | 실제 학습/평가 실행 중 |
+| `Completed` | 완료, 결과 S3에 저장됨 |
+| `Failed` | 실패, FailureReason 확인 필요 |
+
+---
+
+## 파인튜닝 (기존 모델에서 이어서)
+
+기존에 학습된 모델 가중치를 불러와서 새 데이터로 추가 학습:
+
+```bash
+AE_INPUT_S3=s3://aws-s3-speechpt1/datasets/processed/ae/audio-v3/ \
+AE_RESUME_FROM=s3://aws-s3-speechpt1/models/ae/v1/speechpt-ae-train-v1-20260407-090927/output/model.tar.gz \
+AE_EPOCHS=5 \
+AE_LR=3e-4 \
+/usr/local/bin/python3 submit_ae_training.py
+```
+
+> 파인튜닝 시 `AE_LR`은 신규학습(1e-3)보다 낮게 설정 (3e-4 권장).
+
+---
+
+## 추론 (모델로 점수 뽑기)
+
+S3에서 모델을 자동 다운로드해서 추론:
+```bash
+python -m speechpt.training.ae_probe_infer \
+  --audio /path/to/sample.wav \
+  --model-dir /tmp/ae_model \
+  --model-artifact-s3 s3://aws-s3-speechpt1/models/ae/v1/speechpt-ae-train-v1-20260407-090927/output/model.tar.gz
+```
+
+슬라이드 섹션별 점수 (슬라이드1=0~40s, 슬라이드2=40~90s):
+```bash
+python -m speechpt.training.ae_probe_infer \
+  --audio /path/to/sample.wav \
+  --model-dir /tmp/ae_model \
+  --model-artifact-s3 s3://aws-s3-speechpt1/models/ae/v1/speechpt-ae-train-v1-20260407-090927/output/model.tar.gz \
+  --slide-timestamps 0,40,90,130
+```
+
+---
+
+## 엔진 파이프라인 실행
+
+발표 음성 + 슬라이드 PDF → 코칭 리포트:
 ```bash
 python -m speechpt.pipeline \
   --config configs/pipeline_v0.1.yaml \
-  --document /abs/path/slides.pdf \
-  --audio /abs/path/audio.wav \
-  --slide-timestamps 0,30,60,90 \
-  --whisper-json /abs/path/whisper_words.json
+  --document /path/to/slides.pdf \
+  --audio /path/to/audio.wav \
+  --slide-timestamps 0,40,90,130 \
+  --whisper-json /path/to/whisper_words.json
 ```
 
-`whisper_words.json` format:
+`whisper_words.json` 형식:
 ```json
 {
   "words": [
@@ -53,89 +293,11 @@ python -m speechpt.pipeline \
 }
 ```
 
-## Run pipeline (auto STT)
-1. `configs/pipeline_v0.1.yaml`에서 `stt.enabled: true`로 변경
-2. STT 백엔드 옵션 확인 (`backend`, `model_name`, `language`)
-3. 아래 명령 실행
-
-```bash
-python -m speechpt.pipeline \
-  --config configs/pipeline_v0.1.yaml \
-  --document /abs/path/slides.pdf \
-  --audio /abs/path/audio.wav \
-  --slide-timestamps 0,30,60,90
-```
-
-## Visual analysis (image/chart/table)
-현재 지원 범위:
-- 시각 요소 메타 추출 (`visual_items`)
-- PDF 기반 OCR (easyocr) 옵션
-- 시각 캡션(`visual_captions`)을 CE 매칭에 포함
-- 리포트 이슈: `visual_not_explained`
-
-설정 예시 (`configs/pipeline_v0.1.yaml`):
-```yaml
-coherence:
-  visual:
-    enabled: true
-    ocr_engine: easyocr
-    ocr_languages: [ko, en]
-    min_confidence: 0.3
-    max_text_len: 80
-```
-
-## Train CE (LoRA)
-```bash
-python -m speechpt.training.ce_lora_train \
-  --model klue/roberta-base \
-  --train /abs/path/ce_train.jsonl \
-  --valid /abs/path/ce_valid.jsonl \
-  --output artifacts/ce_model
-```
-
-## Train AE (frozen wav2vec2 + probe)
-```bash
-python -m speechpt.training.ae_probe_train \
-  --train /abs/path/ae_train.jsonl \
-  --valid /abs/path/ae_valid.jsonl \
-  --output artifacts/ae_model
-```
-
-## AE Inference (wav -> 5 scores)
-학습된 `ae_probe.pt`를 사용해 다음 점수를 출력합니다:
-`speech_rate`, `silence_ratio`, `energy_drop`, `pitch_shift`, `overall_delivery`
-
-**최신 학습된 모델 아티팩트:**
-```
-s3://aws-s3-speechpt1/models/ae/v1/speechpt-ae-train-v1-20260403-104158/output/model.tar.gz
-```
-
-로컬 모델 디렉터리 사용:
-```bash
-python -m speechpt.training.ae_probe_infer \
-  --audio /abs/path/sample.wav \
-  --model-dir /abs/path/ae_model
-```
-
-S3 모델 아티팩트(`model.tar.gz`)를 바로 사용 (자동 다운로드):
-```bash
-python -m speechpt.training.ae_probe_infer \
-  --audio /abs/path/sample.wav \
-  --model-dir /tmp/ae_model \
-  --model-artifact-s3 s3://aws-s3-speechpt1/models/ae/v1/speechpt-ae-train-v1-20260403-104158/output/model.tar.gz
-```
-
-슬라이드 섹션별 점수 (슬라이드1=0~40s, 슬라이드2=40~90s, ...):
-```bash
-python -m speechpt.training.ae_probe_infer \
-  --audio /abs/path/sample.wav \
-  --model-dir /tmp/ae_model \
-  --model-artifact-s3 s3://aws-s3-speechpt1/models/ae/v1/speechpt-ae-train-v1-20260403-104158/output/model.tar.gz \
-  --slide-timestamps 0,40,90,130
-```
+---
 
 ## Filler Word Detection (간투사 탐지)
-STT 출력에서 "어", "음", "그", "저" 등 간투사를 탐지하고 슬라이드 섹션별로 집계합니다.
+
+STT 출력에서 "어", "음", "그", "저" 등을 탐지하고 슬라이드별로 집계:
 
 ```python
 from speechpt.attitude.filler_detector import detect_fillers
@@ -143,129 +305,8 @@ from speechpt.attitude.filler_detector import detect_fillers
 words = [
     {"word": "안녕하세요", "start": 0.0, "end": 0.4},
     {"word": "어", "start": 1.2, "end": 1.4},
-    {"word": "오늘", "start": 1.5, "end": 1.8},
 ]
 
 result = detect_fillers(words, slide_timestamps=[0, 40, 90])
 # result: {total_fillers, filler_rate, filler_words, per_slide}
 ```
-
-## SageMaker: AE preprocess in cloud (no local full download)
-
-> 전처리는 S3에서 직접 스트리밍하므로 로컬에 131GB 다운로드 불필요.
-
-```bash
-python3 submit_ae_preprocessing.py
-```
-
-환경변수로 커스터마이즈:
-```bash
-AE_PREP_INSTANCE_TYPE=ml.c5.4xlarge \
-AE_PREP_VOLUME_SIZE_GB=100 \
-python3 submit_ae_preprocessing.py
-```
-
-기본 입력/출력:
-- labels: `s3://aws-s3-speechpt1/datasets/raws/Training/02.라벨링데이터/`
-- audio: `s3://aws-s3-speechpt1/datasets/raws/Training/01.원천데이터/`
-- processed output: `s3://aws-s3-speechpt1/datasets/processed/ae/full/`
-
-전처리 결과는 `all.jsonl` + `train/valid/test.jsonl`을 생성합니다.
-
-## AE Best Practice (recommended)
-1. 전처리 전체는 **한 번만** 실행해서 `full/all.jsonl` 생성
-2. 학습은 `all.jsonl`에서 부분집합을 뽑아 반복
-
-부분집합 생성 예시:
-```bash
-python3 -m speechpt.training.make_ae_subset \
-  --input /abs/path/all.jsonl \
-  --output-dir /abs/path/ae_subset_10k \
-  --max-rows 10000
-```
-
-그 뒤 subset `train/valid`만 S3에 올리고 학습:
-```bash
-AE_INPUT_S3=s3://aws-s3-speechpt1/datasets/processed/ae/exp-10k/ \
-AE_INSTANCE_TYPE=ml.g5.xlarge \
-python3 submit_ae_training.py
-```
-
-파인튜닝(fine-tune) — 기존 학습된 모델에서 이어서 학습:
-```bash
-AE_INPUT_S3=s3://aws-s3-speechpt1/datasets/processed/ae/exp-30k/ \
-AE_RESUME_FROM=s3://aws-s3-speechpt1/models/ae/v1/speechpt-ae-train-v1-20260403-104158/output/model.tar.gz \
-AE_EPOCHS=5 \
-AE_LR=3e-4 \
-python3 submit_ae_training.py
-```
-
-> `AE_RESUME_FROM`에 S3 model.tar.gz URI를 지정하면 해당 체크포인트에서 가중치를 복원한 뒤 학습을 이어갑니다.
-
-`submit_ae_training.py`는 동일 `checkpoint_s3_uri`를 사용하면 자동으로 최신 체크포인트를 복원합니다.
-
-## SageMaker: AE evaluate
-```bash
-AE_INPUT_S3=s3://aws-s3-speechpt1/datasets/processed/ae/full/ \
-AE_MODEL_S3=s3://aws-s3-speechpt1/models/ae/v1/speechpt-ae-train-v1-20260403-104158/output/model.tar.gz \
-python3 submit_ae_eval.py
-```
-
-## SageMaker: AE end-to-end (preprocess -> train)
-```bash
-python3 submit_ae_end_to_end.py
-```
-
-## Prepare AE dataset (csv/json/jsonl -> train/valid/test jsonl)
-```bash
-python -m speechpt.training.prepare_ae_dataset \
-  --input /abs/path/ae_raw.csv \
-  --output-dir /abs/path/ae_prepared \
-  --audio-root /abs/path/audio
-```
-
-출력 파일:
-- `/abs/path/ae_prepared/train.jsonl`
-- `/abs/path/ae_prepared/valid.jsonl`
-- `/abs/path/ae_prepared/test.jsonl`
-
-SageMaker 채널(`SM_CHANNEL_TRAINING`)에 `train.jsonl`, `valid.jsonl`을 넣으면
-`ae_probe_train.py`는 `--train/--valid` 없이도 자동으로 파일을 찾습니다.
-단일 파일(`manifest.jsonl`/`data.jsonl`)만 있으면 자동 분할해서 학습합니다.
-
-## Prepare AE dataset from SpeechPT raws (label json + wav)
-```bash
-python -m speechpt.training.prepare_ae_from_raws \
-  --label-dir /abs/path/02.라벨링데이터 \
-  --audio-dir /abs/path/01.원천데이터 \
-  --output-dir /abs/path/ae_prepared
-```
-
-주의:
-- 이 스크립트는 raw 메타 + 음성 신호 기반으로 학습 타깃을 휴리스틱 생성합니다.
-- 정답 점수가 별도로 있으면 그 값을 우선 사용하세요.
-
-## Evaluate
-```bash
-python eval/eval_coherence.py \
-  --gold eval/data/coherence_gold.json \
-  --pred examples/example_ce_output.json
-
-python eval/eval_attitude.py \
-  --gold eval/data/attitude_gold.json \
-  --pred examples/example_ae_output.json
-
-python eval/ablation.py
-```
-
-## Current status
-- Engine core implemented (CE + AE + report)
-- STT auto/manual path implemented
-- wav2vec2 inference path integrated (`use_probe`)
-- Visual OCR/caption matching integrated (PDF-first)
-- Tests passing
-
-## Notes
-- STT 자동 모드는 `stt.enabled: true`가 필요합니다.
-- OCR 사용 시 `easyocr` 설치가 필요합니다.
-- PPT 렌더링 기반 OCR 고도화는 다음 단계입니다.
