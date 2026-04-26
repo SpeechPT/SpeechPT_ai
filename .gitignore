@@ -24,3 +24,7 @@ reports/
 .DS_Store
 .vscode/
 .idea/
+
+dataset.md
+ML.md
+sagemaker.md

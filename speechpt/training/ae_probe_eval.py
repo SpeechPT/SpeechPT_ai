@@ -64,13 +64,15 @@ def main():
     parser.add_argument("--input-dir", default="/opt/ml/input/data/training")
     parser.add_argument("--audio-dir", default="/opt/ml/input/data/audio")
     parser.add_argument("--model", default="kresnik/wav2vec2-large-xlsr-korean")
-    parser.add_argument("--model-artifact-s3-uri", required=True)
+    parser.add_argument("--model-artifact-s3-uri", default="")
+    parser.add_argument("--model-local-dir", default="", help="Local dir with model.tar.gz (pipeline mode). Skips S3 download.")
     parser.add_argument("--audio-s3", default="", help="S3 URI for audio fallback (e.g. s3://bucket/prefix/)")
     parser.add_argument("--sample-rate", type=int, default=16000)
     parser.add_argument("--chunk-sec", type=float, default=20)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--max-test-samples", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--output-dir", default="", help="Output dir for eval_result.json (pipeline mode).")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -110,7 +112,26 @@ def main():
     base_probe = AEProbe(in_dim=in_dim).to(device)
     base_loss = eval_loss(loader, processor, backbone, base_probe, device, sample_rate=args.sample_rate)
 
-    model_path = download_and_extract_model(args.model_artifact_s3_uri, Path("/tmp/ae_eval_model"))
+    # Pipeline mode: load from local dir; Standalone mode: download from S3
+    if args.model_local_dir:
+        local_dir = Path(args.model_local_dir)
+        tar_path = None
+        for f in local_dir.iterdir():
+            if f.name.endswith(".tar.gz"):
+                tar_path = f
+                break
+        if tar_path is not None:
+            extract_dir = Path("/tmp/ae_eval_model")
+            extract_dir.mkdir(parents=True, exist_ok=True)
+            with tarfile.open(tar_path, "r:gz") as tf:
+                tf.extractall(extract_dir)
+            model_path = extract_dir / "ae_probe.pt"
+        else:
+            model_path = local_dir / "ae_probe.pt"
+        if not model_path.exists():
+            raise FileNotFoundError(f"ae_probe.pt not found in {local_dir}")
+    else:
+        model_path = download_and_extract_model(args.model_artifact_s3_uri, Path("/tmp/ae_eval_model"))
     finetuned_probe = AEProbe(in_dim=in_dim).to(device)
     state = torch.load(model_path, map_location=device)
     if isinstance(state, dict) and "model_state_dict" in state:
@@ -133,8 +154,12 @@ def main():
     }
     print(json.dumps(result, ensure_ascii=False))
 
-    out = Path("/opt/ml/model/eval_result.json")
-    out.parent.mkdir(parents=True, exist_ok=True)
+    if args.output_dir:
+        out_dir = Path(args.output_dir)
+    else:
+        out_dir = Path("/opt/ml/model")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / "eval_result.json"
     out.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
 
 

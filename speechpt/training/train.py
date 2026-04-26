@@ -9,7 +9,7 @@ import sys
 
 
 def main():
-    if "--output-s3-uri" in sys.argv:
+    if "--output-s3-uri" in sys.argv or "--output-dir" in sys.argv:
         from ae_preprocess_trainjob import main as preprocess_main
 
         preprocess_main()
