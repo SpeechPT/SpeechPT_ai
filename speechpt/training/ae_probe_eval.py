@@ -73,14 +73,22 @@ def main():
     parser.add_argument("--max-test-samples", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", default="", help="Output dir for eval_result.json (pipeline mode).")
+    parser.add_argument("--eval-file", default="", help="JSONL file name for evaluation (e.g. eval_validation.jsonl). Falls back to test.jsonl.")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     input_dir = Path(args.input_dir)
     audio_dir = Path(args.audio_dir)
-    test_path = input_dir / "test.jsonl"
+    # eval_validation.jsonl (AIHub Validation 세트) 우선, 없으면 test.jsonl 폴백
+    if args.eval_file:
+        test_path = input_dir / args.eval_file
+    else:
+        test_path = input_dir / "eval_validation.jsonl"
+        if not test_path.exists():
+            test_path = input_dir / "test.jsonl"
     if not test_path.exists():
-        raise FileNotFoundError(f"test.jsonl not found under {input_dir}")
+        raise FileNotFoundError(f"{test_path.name} not found under {input_dir}")
+    print(json.dumps({"eval_file": test_path.name}, ensure_ascii=False))
     rows = read_jsonl(test_path)
     if args.max_test_samples > 0:
         rows = rows[: args.max_test_samples]
@@ -126,19 +134,38 @@ def main():
             with tarfile.open(tar_path, "r:gz") as tf:
                 tf.extractall(extract_dir)
             model_path = extract_dir / "ae_probe.pt"
+            model_base_dir = extract_dir
         else:
             model_path = local_dir / "ae_probe.pt"
+            model_base_dir = local_dir
         if not model_path.exists():
             raise FileNotFoundError(f"ae_probe.pt not found in {local_dir}")
     else:
         model_path = download_and_extract_model(args.model_artifact_s3_uri, Path("/tmp/ae_eval_model"))
+        model_base_dir = model_path.parent
+
+    # LoRA adapter 감지 및 적용
+    lora_dir = model_base_dir / "lora_adapter"
+    use_lora = lora_dir.exists() and (lora_dir / "adapter_config.json").exists()
+    if use_lora:
+        from peft import PeftModel
+        finetuned_backbone = Wav2Vec2Model.from_pretrained(args.model).to(device)
+        finetuned_backbone = PeftModel.from_pretrained(finetuned_backbone, str(lora_dir))
+        finetuned_backbone = finetuned_backbone.merge_and_unload()
+        finetuned_backbone.eval()
+        for p in finetuned_backbone.parameters():
+            p.requires_grad = False
+        print(json.dumps({"lora_adapter_loaded": True, "lora_dir": str(lora_dir)}, ensure_ascii=False))
+    else:
+        finetuned_backbone = backbone
+
     finetuned_probe = AEProbe(in_dim=in_dim).to(device)
     state = torch.load(model_path, map_location=device)
     if isinstance(state, dict) and "model_state_dict" in state:
         finetuned_probe.load_state_dict(state["model_state_dict"])
     else:
         finetuned_probe.load_state_dict(state)
-    finetuned_loss = eval_loss(loader, processor, backbone, finetuned_probe, device, sample_rate=args.sample_rate)
+    finetuned_loss = eval_loss(loader, processor, finetuned_backbone, finetuned_probe, device, sample_rate=args.sample_rate)
 
     improvement_abs = base_loss - finetuned_loss
     improvement_pct = (improvement_abs / base_loss * 100.0) if base_loss > 0 else 0.0
@@ -147,6 +174,7 @@ def main():
         "audio_indexed_files": len(audio_index),
         "backbone_model": args.model,
         "probe_input_dim": in_dim,
+        "use_lora": use_lora,
         "base_loss": base_loss,
         "finetuned_loss": finetuned_loss,
         "improvement_abs": improvement_abs,

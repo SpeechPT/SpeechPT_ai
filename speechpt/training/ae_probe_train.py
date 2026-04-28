@@ -284,8 +284,10 @@ def resolve_audio_path(
     return audio_path
 
 
-def train_epoch(loader, processor, backbone, probe, optimizer, device):
+def train_epoch(loader, processor, backbone, probe, optimizer, device, use_lora: bool = False):
     probe.train()
+    if use_lora:
+        backbone.train()
     total_loss = 0.0
     n_batches = 0
     for batch in loader:
@@ -294,9 +296,13 @@ def train_epoch(loader, processor, backbone, probe, optimizer, device):
         wavs, targets = batch
         targets = targets.to(device)
         inputs = processor(list(wavs.numpy()), sampling_rate=16000, return_tensors="pt", padding=True).to(device)
-        with torch.no_grad():
+        if use_lora:
             hidden = backbone(**inputs).last_hidden_state
             pooled = hidden.mean(dim=1)
+        else:
+            with torch.no_grad():
+                hidden = backbone(**inputs).last_hidden_state
+                pooled = hidden.mean(dim=1)
         preds = probe(pooled)
 
         reg_pred = preds[:, [0, 1, 4]]
@@ -313,8 +319,10 @@ def train_epoch(loader, processor, backbone, probe, optimizer, device):
     return total_loss / max(1, n_batches)
 
 
-def eval_epoch(loader, processor, backbone, probe, device):
+def eval_epoch(loader, processor, backbone, probe, device, use_lora: bool = False):
     probe.eval()
+    if use_lora:
+        backbone.eval()
     total_loss = 0.0
     n_batches = 0
     with torch.no_grad():
@@ -371,7 +379,12 @@ def main():
     parser.add_argument("--split-ratio", type=float, default=0.9)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--use-lora", choices=["true", "false"], default="false", help="Enable LoRA fine-tuning on wav2vec2")
+    parser.add_argument("--lora-r", type=int, default=16, help="LoRA rank")
+    parser.add_argument("--lora-alpha", type=int, default=32, help="LoRA alpha scaling")
+    parser.add_argument("--lora-dropout", type=float, default=0.05, help="LoRA dropout")
     args = parser.parse_args()
+    use_lora = args.use_lora.lower() == "true"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -437,14 +450,36 @@ def main():
 
     processor = Wav2Vec2Processor.from_pretrained(args.model)
     backbone = Wav2Vec2Model.from_pretrained(args.model).to(device)
-    backbone.eval()
-    for p in backbone.parameters():
-        p.requires_grad = False
+
+    if use_lora:
+        from peft import LoraConfig, get_peft_model
+
+        for p in backbone.parameters():
+            p.requires_grad = False
+        lora_config = LoraConfig(
+            r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,
+            target_modules=["q_proj", "v_proj"],
+        )
+        backbone = get_peft_model(backbone, lora_config)
+        trainable = sum(p.numel() for p in backbone.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in backbone.parameters())
+        print(json.dumps({"lora_enabled": True, "lora_r": args.lora_r, "lora_trainable_params": trainable, "total_params": total}, ensure_ascii=False))
+    else:
+        backbone.eval()
+        for p in backbone.parameters():
+            p.requires_grad = False
 
     in_dim = int(getattr(backbone.config, "hidden_size", 768))
-    print(json.dumps({"probe_input_dim": in_dim}, ensure_ascii=False))
+    print(json.dumps({"probe_input_dim": in_dim, "use_lora": use_lora}, ensure_ascii=False))
     probe = AEProbe(in_dim=in_dim).to(device)
-    optimizer = torch.optim.Adam(probe.parameters(), lr=args.lr)
+
+    if use_lora:
+        params = list(probe.parameters()) + list(backbone.parameters())
+        optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, params), lr=args.lr)
+    else:
+        optimizer = torch.optim.Adam(probe.parameters(), lr=args.lr)
 
     start_epoch = 1
     best_loss = float("inf")
@@ -477,8 +512,8 @@ def main():
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(start_epoch, args.epochs + 1):
-        train_loss = train_epoch(train_loader, processor, backbone, probe, optimizer, device)
-        valid_loss = eval_epoch(valid_loader, processor, backbone, probe, device)
+        train_loss = train_epoch(train_loader, processor, backbone, probe, optimizer, device, use_lora=use_lora)
+        valid_loss = eval_epoch(valid_loader, processor, backbone, probe, device, use_lora=use_lora)
         print(json.dumps({"epoch": epoch, "train_loss": train_loss, "valid_loss": valid_loss}, ensure_ascii=False))
 
         latest_state = {
@@ -493,6 +528,9 @@ def main():
         if valid_loss < best_loss:
             best_loss = valid_loss
             torch.save(probe.state_dict(), Path(args.output) / "ae_probe.pt")
+            if use_lora:
+                lora_dir = Path(args.output) / "lora_adapter"
+                backbone.save_pretrained(str(lora_dir))
             if checkpoint_dir is not None:
                 best_state = {
                     "epoch": epoch,
@@ -502,10 +540,10 @@ def main():
                 }
                 torch.save(best_state, checkpoint_dir / "ae_probe_best.pt")
 
-    torch.save(
-        {"model": args.model, "sample_rate": args.sample_rate, "chunk_sec": args.chunk_sec, "dropout": 0.1},
-        Path(args.output) / "meta.pt",
-    )
+    meta = {"model": args.model, "sample_rate": args.sample_rate, "chunk_sec": args.chunk_sec, "dropout": 0.1, "use_lora": use_lora}
+    if use_lora:
+        meta.update({"lora_r": args.lora_r, "lora_alpha": args.lora_alpha, "lora_dropout": args.lora_dropout})
+    torch.save(meta, Path(args.output) / "meta.pt")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""SpeechPT AE — SageMaker Pipeline (전처리 → 학습 → 평가).
+"""SpeechPT AE — SageMaker Pipeline (전처리 → 학습 → 평가 → 품질 게이트 → 모델 등록).
 
 사용법:
     # 소규모 테스트 (라벨 100개만)
@@ -6,6 +6,9 @@
 
     # 전체 데이터
     python pipeline_ae.py
+
+    # LoRA 파인튜닝
+    python pipeline_ae.py --use-lora --lr 1e-4
 
     # 파라미터 커스텀
     python pipeline_ae.py --epochs 15 --lr 1e-4 --batch-size 16
@@ -15,15 +18,20 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 
-import sagemaker
 from sagemaker.estimator import Estimator
 from sagemaker.inputs import TrainingInput
+from sagemaker.model import Model
 from sagemaker.processing import ProcessingInput, ProcessingOutput
 from sagemaker.pytorch import PyTorch
 from sagemaker.pytorch.processing import PyTorchProcessor
-from sagemaker.workflow.parameters import ParameterInteger, ParameterString
+from sagemaker.workflow.condition_step import ConditionStep
+from sagemaker.workflow.conditions import ConditionGreaterThanOrEqualTo
+from sagemaker.workflow.functions import JsonGet
+from sagemaker.workflow.model_step import ModelStep
+from sagemaker.workflow.parameters import ParameterFloat, ParameterInteger, ParameterString
 from sagemaker.workflow.pipeline import Pipeline
 from sagemaker.workflow.pipeline_context import PipelineSession
+from sagemaker.workflow.properties import PropertyFile
 from sagemaker.workflow.steps import ProcessingStep, TrainingStep
 
 
@@ -34,14 +42,21 @@ REGION = "ap-northeast-2"
 PIPELINE_NAME = "SpeechPT-AE-Pipeline"
 IMAGE_URI = "242071452299.dkr.ecr.ap-northeast-2.amazonaws.com/speechpt-training:latest"
 
-# S3 경로
+# S3 경로 — Training 데이터
 LABELS_S3 = f"s3://{BUCKET}/datasets/raws/Training/02.라벨링데이터/"
 AUDIO_S3 = f"s3://{BUCKET}/datasets/raws/Training/01.원천데이터/"
+
+# S3 경로 — Validation 데이터 (독립 평가셋)
+VAL_LABELS_S3 = f"s3://{BUCKET}/datasets/raws/Validation/02.라벨링데이터/"
+VAL_AUDIO_S3 = f"s3://{BUCKET}/datasets/raws/Validation/01.원천데이터/"
 
 # 프레임워크
 FRAMEWORK_VERSION = "2.1"
 PY_VERSION = "py310"
 SOURCE_DIR = "./speechpt/training/"
+
+# 모델 레지스트리
+MODEL_PACKAGE_GROUP = "SpeechPT-AE-Models"
 
 
 def create_pipeline(args) -> Pipeline:
@@ -56,12 +71,21 @@ def create_pipeline(args) -> Pipeline:
     param_backbone = ParameterString(
         name="BackboneModel", default_value="kresnik/wav2vec2-large-xlsr-korean"
     )
+    param_use_lora = ParameterString(name="UseLora", default_value=str(args.use_lora).lower())
+    param_lora_r = ParameterInteger(name="LoraR", default_value=args.lora_r)
+    param_quality_threshold = ParameterFloat(
+        name="QualityThreshold", default_value=args.quality_threshold
+    )
+    param_approval_status = ParameterString(
+        name="ApprovalStatus", default_value=args.approval_status
+    )
 
     processed_s3 = f"s3://{BUCKET}/pipeline/ae/{ts}/processed/"
 
     # ===== Step 1: 전처리 (TrainingStep) =====
-    # Processing Job에 ml.c5 할당량이 없으므로 기존과 동일하게 Estimator로 실행.
-    # 전처리 결과를 S3에 업로드하고, 학습 Step이 그 경로를 참조한다.
+    # Processing Job에 ml.c5 할당량이 없으므로 Estimator(커스텀 Docker 이미지)로 실행.
+    # Training 데이터 → train/valid/test.jsonl
+    # Validation 데이터 → eval_validation.jsonl (독립 평가셋)
     prep_estimator = Estimator(
         image_uri=IMAGE_URI,
         role=ROLE,
@@ -79,6 +103,8 @@ def create_pipeline(args) -> Pipeline:
             "use-audio-features": "true",
             "s3-rescue-on-empty": "true",
             "max-files": param_max_files,
+            "val-labels-s3-uri": VAL_LABELS_S3,
+            "val-audio-s3-uri": VAL_AUDIO_S3,
         },
         sagemaker_session=pipeline_session,
     )
@@ -116,6 +142,8 @@ def create_pipeline(args) -> Pipeline:
             "model": param_backbone,
             "chunk-sec": 30,
             "audio-s3": AUDIO_S3,
+            "use-lora": param_use_lora,
+            "lora-r": param_lora_r,
         },
         sagemaker_session=pipeline_session,
     )
@@ -140,8 +168,8 @@ def create_pipeline(args) -> Pipeline:
     )
 
     # ===== Step 3: 평가 (ProcessingStep) =====
-    # 학습된 모델 artifact를 받아서 test set으로 평가.
-    # ml.t3.xlarge 사용 (processing job 할당량 내).
+    # 학습된 모델 artifact를 Validation 데이터(독립 평가셋)로 평가.
+    # eval_validation.jsonl 사용 + Validation 오디오 S3 스트리밍.
     eval_processor = PyTorchProcessor(
         framework_version=FRAMEWORK_VERSION,
         py_version=PY_VERSION,
@@ -180,15 +208,63 @@ def create_pipeline(args) -> Pipeline:
             "--model-local-dir", "/opt/ml/processing/input/model/",
             "--output-dir", "/opt/ml/processing/output/",
             "--model", "kresnik/wav2vec2-large-xlsr-korean",
-            "--audio-s3", AUDIO_S3,
+            "--eval-file", "eval_validation.jsonl",
+            "--audio-s3", VAL_AUDIO_S3,
             "--chunk-sec", "20",
             "--batch-size", "2",
         ],
     )
 
+    # PropertyFile: eval_result.json에서 품질 지표 추출
+    eval_report = PropertyFile(
+        name="EvalReport",
+        output_name="evaluation",
+        path="eval_result.json",
+    )
+
     step_eval = ProcessingStep(
         name="AE-Evaluate",
         step_args=step_eval_args,
+        property_files=[eval_report],
+    )
+
+    # ===== Step 5: 모델 등록 (ModelStep) =====
+    # 품질 게이트 통과 시 ModelPackageGroup에 모델 등록.
+    model = Model(
+        image_uri=IMAGE_URI,
+        model_data=step_train.properties.ModelArtifacts.S3ModelArtifacts,
+        sagemaker_session=pipeline_session,
+        role=ROLE,
+    )
+
+    step_register = ModelStep(
+        name="AE-RegisterModel",
+        step_args=model.register(
+            content_types=["application/json"],
+            response_types=["application/json"],
+            inference_instances=["ml.t2.medium", "ml.m5.large"],
+            transform_instances=["ml.m5.large"],
+            model_package_group_name=MODEL_PACKAGE_GROUP,
+            approval_status=param_approval_status,
+        ),
+    )
+
+    # ===== Step 4: 품질 게이트 (ConditionStep) =====
+    # improvement_pct >= QualityThreshold 이면 모델 등록, 아니면 스킵.
+    condition_quality = ConditionGreaterThanOrEqualTo(
+        left=JsonGet(
+            step_name=step_eval.name,
+            property_file=eval_report,
+            json_path="improvement_pct",
+        ),
+        right=param_quality_threshold,
+    )
+
+    step_quality_gate = ConditionStep(
+        name="AE-QualityGate",
+        conditions=[condition_quality],
+        if_steps=[step_register],
+        else_steps=[],
     )
 
     # ===== 파이프라인 조립 =====
@@ -200,8 +276,12 @@ def create_pipeline(args) -> Pipeline:
             param_lr,
             param_batch_size,
             param_backbone,
+            param_use_lora,
+            param_lora_r,
+            param_quality_threshold,
+            param_approval_status,
         ],
-        steps=[step_preprocess, step_train, step_eval],
+        steps=[step_preprocess, step_train, step_eval, step_quality_gate],
         sagemaker_session=pipeline_session,
     )
 
@@ -215,13 +295,24 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument(
-        "--prep-instance-type", default="ml.m5.xlarge", help="전처리 인스턴스 (Training Job)"
+        "--prep-instance-type", default="ml.c5.4xlarge", help="전처리 인스턴스 (Training Job)"
     )
     parser.add_argument(
-        "--train-instance-type", default="ml.g5.xlarge", help="학습 인스턴스"
+        "--train-instance-type", default="ml.g5.2xlarge", help="학습 인스턴스"
     )
     parser.add_argument(
-        "--eval-instance-type", default="ml.t3.xlarge", help="평가 인스턴스 (Processing Job)"
+        "--eval-instance-type", default="ml.g5.xlarge", help="평가 인스턴스 (Processing Job, GPU)"
+    )
+    parser.add_argument("--use-lora", action="store_true", help="LoRA 파인튜닝 활성화")
+    parser.add_argument("--lora-r", type=int, default=16, help="LoRA rank (8, 16, 32)")
+    parser.add_argument(
+        "--quality-threshold", type=float, default=50.0,
+        help="모델 등록 기준 improvement_pct (%)"
+    )
+    parser.add_argument(
+        "--approval-status", default="PendingManualApproval",
+        choices=["PendingManualApproval", "Approved"],
+        help="모델 등록 승인 상태"
     )
     parser.add_argument("--upsert-only", action="store_true", help="파이프라인 등록만 하고 실행 안 함")
     args = parser.parse_args()
@@ -243,7 +334,10 @@ def main():
     )
     print("파이프라인 실행 시작!")
     print(f"  Execution ARN: {execution.arn}")
-    print(f"  파라미터: MaxFiles={args.max_files}, Epochs={args.epochs}, LR={args.lr}, BatchSize={args.batch_size}")
+    lora_str = f", LoRA=r{args.lora_r}" if args.use_lora else ", LoRA=off"
+    print(f"  파라미터: MaxFiles={args.max_files}, Epochs={args.epochs}, LR={args.lr}, BatchSize={args.batch_size}{lora_str}")
+    print(f"  품질 기준: improvement_pct >= {args.quality_threshold}%")
+    print(f"  승인 상태: {args.approval_status}")
     print()
     print("진행 상황 확인:")
     print(f"  SageMaker 콘솔 → Pipelines → {PIPELINE_NAME}")

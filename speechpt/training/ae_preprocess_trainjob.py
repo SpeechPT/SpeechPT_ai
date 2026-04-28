@@ -282,6 +282,8 @@ def main():
     parser.add_argument("--use-audio-features", choices=["true", "false"], default="false")
     parser.add_argument("--allow-label-only-fallback", choices=["true", "false"], default="false")
     parser.add_argument("--s3-rescue-on-empty", choices=["true", "false"], default="true")
+    parser.add_argument("--val-labels-s3-uri", default="", help="Validation labels S3 URI (별도 평가셋)")
+    parser.add_argument("--val-audio-s3-uri", default="", help="Validation audio S3 URI (별도 평가셋)")
     args = parser.parse_args()
     use_audio_features = args.use_audio_features.lower() == "true"
     require_readable_audio = args.require_readable_audio.lower() == "true"
@@ -461,6 +463,21 @@ def main():
     write_jsonl(valid_path, valid_rows)
     write_jsonl(test_path, test_rows)
 
+    # Validation 데이터 처리 (별도 AIHub Validation 세트 → eval_validation.jsonl)
+    eval_val_rows: list[dict] = []
+    val_stats: dict | None = None
+    if args.val_labels_s3_uri:
+        print(json.dumps({"stage": "validation_processing_start", "val_labels_s3_uri": args.val_labels_s3_uri}, ensure_ascii=False))
+        eval_val_rows, val_stats = build_rows_from_s3(
+            args.val_labels_s3_uri,
+            max_files=0,
+            audio_s3_uri=args.val_audio_s3_uri,
+            use_audio_features=use_audio_features,
+        )
+        eval_val_path = out_dir / "eval_validation.jsonl"
+        write_jsonl(eval_val_path, eval_val_rows)
+        print(json.dumps({"stage": "validation_processing_done", "eval_validation_rows": len(eval_val_rows), "stats": val_stats}, ensure_ascii=False))
+
     if not args.output_dir and args.output_s3_uri:
         bucket, prefix = parse_s3_uri(args.output_s3_uri.rstrip("/") + "/")
         s3 = boto3.client("s3")
@@ -468,6 +485,8 @@ def main():
         s3.upload_file(str(train_path), bucket, f"{prefix}train.jsonl")
         s3.upload_file(str(valid_path), bucket, f"{prefix}valid.jsonl")
         s3.upload_file(str(test_path), bucket, f"{prefix}test.jsonl")
+        if eval_val_rows:
+            s3.upload_file(str(out_dir / "eval_validation.jsonl"), bucket, f"{prefix}eval_validation.jsonl")
 
     print(
         json.dumps(
@@ -487,9 +506,10 @@ def main():
                 "s3_rescue_on_empty": s3_rescue_on_empty,
                 "fallback_used": fallback_used,
                 "s3_fallback_stats": s3_fallback_stats,
-                "counts": {"train": len(train_rows), "valid": len(valid_rows), "test": len(test_rows)},
+                "counts": {"train": len(train_rows), "valid": len(valid_rows), "test": len(test_rows), "eval_validation": len(eval_val_rows)},
                 "output_dir": args.output_dir or "",
                 "output_s3": args.output_s3_uri,
+                "val_stats": val_stats,
             },
             ensure_ascii=False,
         )
