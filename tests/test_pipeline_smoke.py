@@ -165,3 +165,101 @@ def test_pipeline_requires_words_if_stt_disabled(tmp_path: Path):
     pipeline = SpeechPTPipeline(str(cfg_path))
     with pytest.raises(ValueError):
         pipeline._resolve_whisper_result("dummy.wav", whisper_result=None)
+
+
+def test_pipeline_runtime_stt_override_enables_transcription(monkeypatch, tmp_path: Path):
+    cfg = {
+        "version": "0.3.0",
+        "coherence": {"model_name": "dummy", "threshold": 0.55},
+        "attitude": {"wav2vec2": {"use_probe": False}},
+        "stt": {"enabled": False, "backend": "faster-whisper", "model_name": "small"},
+        "report": {"template": "speechpt/report/templates/feedback_ko.yaml"},
+    }
+    cfg_path = tmp_path / "pipeline.yaml"
+    cfg_path.write_text(json.dumps(cfg))
+
+    pipeline = SpeechPTPipeline(str(cfg_path))
+    pipeline.apply_runtime_overrides({"stt": {"enabled": True, "model_name": "base"}})
+
+    monkeypatch.setattr(
+        "speechpt.pipeline.transcribe_audio",
+        lambda *args, **kwargs: {"words": [{"word": "테스트", "start": 0.0, "end": 0.2}], "text": "테스트"},
+    )
+
+    result = pipeline._resolve_whisper_result("dummy.wav", whisper_result=None)
+    assert pipeline.stt_cfg["enabled"] is True
+    assert pipeline.stt_cfg["model_name"] == "base"
+    assert result["words"][0]["word"] == "테스트"
+
+
+def test_pipeline_keeps_all_slides_when_middle_segment_is_empty(monkeypatch, tmp_path: Path):
+    cfg = {
+        "version": "0.3.0",
+        "coherence": {"model_name": "dummy", "threshold": 0.55},
+        "attitude": {"wav2vec2": {"use_probe": False}},
+        "stt": {"enabled": False},
+        "report": {"template": "speechpt/report/templates/feedback_ko.yaml"},
+    }
+    cfg_path = tmp_path / "pipeline.yaml"
+    cfg_path.write_text(json.dumps(cfg))
+
+    monkeypatch.setattr(
+        "speechpt.pipeline.document_parser.parse_document",
+        lambda _: [
+            SlideContent(slide_id=1, text="내용1", title="제목1", bullet_points=["포인트1"]),
+            SlideContent(slide_id=2, text="내용2", title="제목2", bullet_points=["포인트2"]),
+            SlideContent(slide_id=3, text="내용3", title="제목3", bullet_points=["포인트3"]),
+        ],
+    )
+    monkeypatch.setattr(
+        "speechpt.pipeline.keypoint_extractor.extract_keypoints",
+        lambda slide: [Keypoint(text=slide.title, importance=1.0, source="title")],
+    )
+    monkeypatch.setattr(
+        "speechpt.pipeline.transcript_aligner.align_transcript",
+        lambda words, times: [
+            TranscriptSegment(slide_id=1, start_sec=0.0, end_sec=5.0, text="첫 슬라이드", words=words[:1]),
+            TranscriptSegment(slide_id=2, start_sec=5.0, end_sec=10.0, text="", words=[], warning_flags=["empty_segment"]),
+            TranscriptSegment(slide_id=3, start_sec=10.0, end_sec=15.0, text="셋째 슬라이드", words=words[1:]),
+        ],
+    )
+    monkeypatch.setattr(
+        "speechpt.pipeline.coherence_scorer.score_slide",
+        lambda keypoints, segment, **kwargs: SlideCoherenceResult(
+            slide_id=segment.slide_id,
+            coverage=0.0 if not segment.text else 0.9,
+            missed_keypoints=[] if segment.text else [kp.text for kp in keypoints],
+            evidence_spans=[],
+        ),
+    )
+    monkeypatch.setattr(
+        "speechpt.pipeline.extract_audio_features",
+        lambda *args, **kwargs: AudioFeatures(
+            duration_sec=15.0,
+            pitch=[100.0, 110.0],
+            energy=[-10.0, -11.0],
+            speech_rate_per_sec=[3.0, 3.1],
+            silence_mask=[False, False],
+            frame_times=[0.0, 15.0],
+        ),
+    )
+    monkeypatch.setattr("speechpt.pipeline.detect_change_points", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        "speechpt.pipeline.score_attitude",
+        lambda *args, **kwargs: [
+            SegmentAttitude(slide_id=1, start_sec=0.0, end_sec=5.0, features={"avg_speech_rate": 3.0, "silence_ratio": 0.1}, change_points=[], trend_label="stable", anomaly_flags=[], fillers=[]),
+            SegmentAttitude(slide_id=2, start_sec=5.0, end_sec=10.0, features={"avg_speech_rate": 3.0, "silence_ratio": 0.1}, change_points=[], trend_label="stable", anomaly_flags=[], fillers=[]),
+            SegmentAttitude(slide_id=3, start_sec=10.0, end_sec=15.0, features={"avg_speech_rate": 3.0, "silence_ratio": 0.1}, change_points=[], trend_label="stable", anomaly_flags=[], fillers=[]),
+        ],
+    )
+
+    pipeline = SpeechPTPipeline(str(cfg_path))
+    report = pipeline.analyze(
+        document_path="dummy.pdf",
+        audio_path="dummy.wav",
+        slide_timestamps=[0.0, 5.0, 10.0, 15.0],
+        whisper_result={"words": [{"word": "첫", "start": 0.0, "end": 0.2}, {"word": "셋째", "start": 10.1, "end": 10.3}]},
+    )
+
+    assert len(report.per_slide_detail) == 3
+    assert report.per_slide_detail[1]["slide_id"] == 2

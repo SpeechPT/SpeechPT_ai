@@ -34,6 +34,8 @@ class SlideCoherenceResult:
     coverage: float
     missed_keypoints: List[str]
     evidence_spans: List[Dict]
+    source_coverage: Dict[str, float] | None = None
+    source_missed_keypoints: Dict[str, List[str]] | None = None
 
 
 def _chunk_transcript(text: str, max_len: int = 120) -> List[str]:
@@ -91,6 +93,16 @@ def score_slide(
     total_importance = kp_importance.sum() + 1e-8
     coverage = float(covered_importance / total_importance)
 
+    source_coverage: Dict[str, float] = {}
+    source_missed_keypoints: Dict[str, List[str]] = {}
+    sources = sorted({kp.source for kp in keypoints})
+    for source in sources:
+        source_indices = np.array([i for i, kp in enumerate(keypoints) if kp.source == source], dtype=int)
+        source_total = float(kp_importance[source_indices].sum()) + 1e-8
+        source_covered = float(kp_importance[source_indices][covered_mask[source_indices]].sum())
+        source_coverage[source] = float(source_covered / source_total)
+        source_missed_keypoints[source] = [kp_texts[int(i)] for i in source_indices if not covered_mask[int(i)]]
+
     evidence_spans: List[Dict] = []
     for idx, kp in enumerate(keypoints):
         best_idx = int(sim_matrix[idx].argmax())
@@ -110,6 +122,8 @@ def score_slide(
         coverage=coverage,
         missed_keypoints=missed,
         evidence_spans=evidence_spans,
+        source_coverage=source_coverage,
+        source_missed_keypoints=source_missed_keypoints,
     )
 
 

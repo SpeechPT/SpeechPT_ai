@@ -11,6 +11,14 @@ issue_templates:
     issue: content_gap
     severity: low
     text: "슬라이드 {slide_id}에서 {missed} 언급이 짧았습니다. 보완하면 완성도가 올라갑니다."
+  - id: title_missing
+    issue: title_missing
+    severity: high
+    text: "슬라이드 {slide_id}의 핵심 제목/주제({missed}) 설명이 빠졌습니다. 이 슬라이드가 무엇을 말하는지 먼저 한 문장으로 못 박아주세요."
+  - id: bullet_missing
+    issue: bullet_missing
+    severity: medium
+    text: "슬라이드 {slide_id}의 세부 포인트({missed}) 설명이 부족합니다. 제목만 말하지 말고 핵심 bullet을 순서대로 짚어주세요."
   - id: visual_not_explained
     issue: visual_not_explained
     severity: medium

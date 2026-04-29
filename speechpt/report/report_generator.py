@@ -32,6 +32,8 @@ class SpeechReport:
 
 ISSUE_WEIGHT = {
     "content_gap": 3,
+    "title_missing": 3,
+    "bullet_missing": 2,
     "speed_drop": 2,
     "silence_excess": 1,
     "visual_not_explained": 2,
@@ -91,8 +93,15 @@ def _split_missed_keypoints(ce: SlideCoherenceResult | None) -> tuple[List[str],
 def _issue_from_slide(ce: SlideCoherenceResult | None, ae: SegmentAttitude | None) -> List[Dict]:
     issues: List[Dict] = []
     text_missed, visual_missed = _split_missed_keypoints(ce)
+    source_missed = ce.source_missed_keypoints if ce and ce.source_missed_keypoints else {}
+    title_missed = source_missed.get("title", [])
+    bullet_missed = source_missed.get("bullet", [])
 
-    if ce and ce.coverage < 0.7 and text_missed:
+    if title_missed:
+        issues.append({"id": "title_missing", "missed": title_missed})
+    if ce and ce.coverage < 0.7 and bullet_missed:
+        issues.append({"id": "bullet_missing", "missed": bullet_missed})
+    elif ce and ce.coverage < 0.7 and text_missed and not title_missed:
         issues.append({"id": "content_gap", "missed": text_missed})
     if visual_missed:
         issues.append({"id": "visual_not_explained", "visual_missed": visual_missed})
@@ -128,6 +137,8 @@ def _template_id_for_issue(issue_id: str, ce: SlideCoherenceResult | None) -> st
             return "content_gap_mid"
         return "content_gap_low"
     mapping = {
+        "title_missing": "title_missing",
+        "bullet_missing": "bullet_missing",
         "speed_drop": "speed_drop",
         "speed_rise": "speed_rise",
         "silence_excess": "silence_excess",
@@ -201,8 +212,10 @@ def generate_report(
             {
                 "slide_id": slide_id,
                 "coverage": ce.coverage if ce else None,
+                "source_coverage": ce.source_coverage if ce and ce.source_coverage else {},
                 "missed": text_missed,
                 "visual_missed": visual_missed,
+                "source_missed": ce.source_missed_keypoints if ce and ce.source_missed_keypoints else {},
                 "speech_rate": ae.features.get("avg_speech_rate", None) if ae else None,
                 "silence_ratio": ae.features.get("silence_ratio", None) if ae else None,
                 "trend": ae.trend_label if ae else None,
