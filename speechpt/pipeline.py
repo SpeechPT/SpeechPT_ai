@@ -35,6 +35,14 @@ class SpeechPTPipeline:
         self.stt_cfg = self.cfg.get("stt", {})
         self.report_tpl = Path(self.cfg.get("report", {}).get("template", "speechpt/report/templates/feedback_ko.yaml"))
 
+    def apply_runtime_overrides(self, overrides: Dict | None = None) -> None:
+        if not overrides:
+            return
+        stt_overrides = overrides.get("stt", {})
+        for key, value in stt_overrides.items():
+            if value is not None:
+                self.stt_cfg[key] = value
+
     def _time(self, desc: str):
         start = time.perf_counter()
 
@@ -107,7 +115,19 @@ class SpeechPTPipeline:
 
         done = self._time("ce_scoring")
         ce_results = []
-        for keypoints, segment in zip(slide_keypoints, segments):
+        segment_map = {segment.slide_id: segment for segment in segments}
+        for slide, keypoints in zip(slides, slide_keypoints):
+            segment = segment_map.get(
+                slide.slide_id,
+                transcript_aligner.TranscriptSegment(
+                    slide_id=slide.slide_id,
+                    start_sec=0.0,
+                    end_sec=0.0,
+                    text="",
+                    words=[],
+                    warning_flags=["missing_segment"],
+                ),
+            )
             ce_results.append(
                 coherence_scorer.score_slide(
                     keypoints,
@@ -195,6 +215,13 @@ def main():
         default=None,
         help="Path to JSON with {'words': [{'word','start','end'}, ...]}. Optional if STT enabled.",
     )
+    parser.add_argument("--stt-enabled", action="store_true", help="Force-enable STT even if config disables it.")
+    parser.add_argument("--stt-backend", default=None, choices=["faster-whisper", "openai-whisper"])
+    parser.add_argument("--stt-model", default=None, help="Override STT model name")
+    parser.add_argument("--stt-language", default=None, help="Override STT language")
+    parser.add_argument("--stt-compute-type", default=None, help="Override STT compute type")
+    parser.add_argument("--stt-device", default=None, help="Override STT device")
+    parser.add_argument("--save-whisper-json", default=None, help="Optional path to save the STT result JSON")
     args = parser.parse_args()
 
     slide_timestamps = [float(x.strip()) for x in args.slide_timestamps.split(",") if x.strip()]
@@ -203,6 +230,23 @@ def main():
         whisper_result = json.loads(Path(args.whisper_json).read_text())
 
     pipeline = SpeechPTPipeline(config_path=args.config)
+    pipeline.apply_runtime_overrides(
+        {
+            "stt": {
+                "enabled": True if args.stt_enabled else None,
+                "backend": args.stt_backend,
+                "model_name": args.stt_model,
+                "language": args.stt_language,
+                "compute_type": args.stt_compute_type,
+                "device": args.stt_device,
+            }
+        }
+    )
+    if whisper_result is None and args.save_whisper_json:
+        whisper_result = pipeline._resolve_whisper_result(args.audio, whisper_result=None)
+        out = Path(args.save_whisper_json)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(whisper_result, ensure_ascii=False, indent=2), encoding="utf-8")
     report = pipeline.analyze(
         document_path=args.document,
         audio_path=args.audio,

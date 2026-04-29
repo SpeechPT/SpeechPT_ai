@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List
@@ -13,6 +14,8 @@ from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+_BULLET_PREFIX_RE = re.compile(r"^(?:[-•·*●▪◦‣]|[0-9]+[.)]|[A-Za-z][.)])\s*")
 
 
 @dataclass
@@ -41,15 +44,188 @@ class SlideContent:
     visual_items: List[VisualItem] = field(default_factory=list)
 
 
+@dataclass
+class PdfLine:
+    text: str
+    font_size: float
+    y0: float
+    x0: float
+
+
+def _strip_bullet_prefix(text: str) -> str:
+    stripped = text.strip()
+    if stripped and 0xF000 <= ord(stripped[0]) <= 0xF8FF:
+        return stripped[1:].strip()
+    return _BULLET_PREFIX_RE.sub("", stripped).strip()
+
+
+def _normalize_pdf_text(text: str) -> str:
+    stripped = " ".join(text.strip().split())
+    if not stripped:
+        return stripped
+    tokens = stripped.split(" ")
+    if len(tokens) >= 4:
+        short_tokens = sum(1 for token in tokens if len(token) <= 2)
+        if short_tokens / max(1, len(tokens)) >= 0.75:
+            return "".join(tokens)
+    return stripped
+
+
+def _is_iconish_line(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    return all(0xF000 <= ord(ch) <= 0xF8FF for ch in stripped)
+
+
+def _is_metricish_line(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    compact = stripped.replace(" ", "")
+    metric_tokens = {"%", "H", "년차", "건", "초", "명", "억+", "AI"}
+    if any(token in compact for token in metric_tokens) and len(compact) <= 6:
+        return True
+    return compact.replace(".", "").replace("+", "").isdigit()
+
+
+def _title_score(text: str) -> float:
+    stripped = text.strip()
+    if not stripped:
+        return -1.0
+    score = float(len(stripped))
+    if _is_iconish_line(stripped):
+        return -1.0
+    if _is_metricish_line(stripped):
+        score -= 20.0
+    if _looks_like_bullet(stripped):
+        score -= 25.0
+    if any(ch.isalpha() for ch in stripped):
+        score += 2.0
+    if any("\uac00" <= ch <= "\ud7a3" for ch in stripped):
+        score += 2.0
+    if stripped.isupper():
+        score += 1.0
+    return score
+
+
+def _pdf_title_score(line: PdfLine) -> float:
+    stripped = line.text.strip()
+    score = _title_score(stripped)
+    if score < 0:
+        return score
+    score += min(line.font_size, 40.0) * 2.2
+    score += max(0.0, 180.0 - min(line.y0, 180.0)) * 0.12
+    if len(stripped) > 60:
+        score -= 12.0
+    if len(stripped) < 3:
+        score -= 6.0
+    if line.font_size >= 24.0 and line.y0 <= 110.0:
+        score += 18.0
+    elif line.font_size >= 18.0 and line.y0 <= 140.0:
+        score += 8.0
+    return score
+
+
+def _looks_like_bullet(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if len(stripped) > 1 and 0xF000 <= ord(stripped[0]) <= 0xF8FF:
+        return True
+    if _BULLET_PREFIX_RE.match(stripped):
+        return True
+    # PPT paragraphs often lose explicit markers but remain short noun-phrase lines.
+    return False
+
+
 def _extract_bullets(lines: List[str]) -> List[str]:
     bullets = []
     for line in lines:
         stripped = line.strip()
         if not stripped:
             continue
-        if stripped.startswith(("-", "•", "·", "*", "●")):
-            bullets.append(stripped.lstrip("-•·*● "))
+        if _looks_like_bullet(stripped):
+            normalized = _strip_bullet_prefix(stripped)
+            if normalized:
+                bullets.append(normalized)
     return bullets
+
+
+def _normalize_content_line(text: str) -> str:
+    stripped = _normalize_pdf_text(text)
+    if not stripped or _is_iconish_line(stripped):
+        return ""
+    if _looks_like_bullet(stripped):
+        return _strip_bullet_prefix(stripped)
+    if stripped and 0xF000 <= ord(stripped[0]) <= 0xF8FF:
+        return stripped[1:].strip()
+    return stripped
+
+
+def _select_title(lines: List[str]) -> str:
+    candidates = []
+    for idx, line in enumerate(lines[:8]):
+        stripped = line.strip()
+        if not stripped or _is_iconish_line(stripped):
+            continue
+        candidates.append((idx, _title_score(stripped), stripped))
+    if not candidates:
+        return lines[0].strip() if lines else ""
+    candidates.sort(key=lambda item: (item[1], -item[0]), reverse=True)
+    return candidates[0][2]
+
+
+def _extract_pdf_lines(page: fitz.Page) -> List[PdfLine]:
+    text_dict = page.get_text("dict")
+    extracted: List[PdfLine] = []
+    for block in text_dict.get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", []):
+            spans = line.get("spans", [])
+            parts = []
+            sizes = []
+            y_positions = []
+            x_positions = []
+            for span in spans:
+                text = str(span.get("text", "")).strip()
+                if not text:
+                    continue
+                parts.append(text)
+                sizes.append(float(span.get("size", 0.0)))
+                bbox = span.get("bbox", [0.0, 0.0, 0.0, 0.0])
+                y_positions.append(float(bbox[1]))
+                x_positions.append(float(bbox[0]))
+            if not parts:
+                continue
+            extracted.append(
+                PdfLine(
+                    text=_normalize_pdf_text(" ".join(parts)),
+                    font_size=max(sizes) if sizes else 0.0,
+                    y0=min(y_positions) if y_positions else 0.0,
+                    x0=min(x_positions) if x_positions else 0.0,
+                )
+            )
+    extracted.sort(key=lambda line: (line.y0, line.x0))
+    return extracted
+
+
+def _select_pdf_title(pdf_lines: List[PdfLine], fallback_lines: List[str]) -> str:
+    candidates = []
+    for idx, line in enumerate(pdf_lines):
+        stripped = line.text.strip()
+        if not stripped or _is_iconish_line(stripped):
+            continue
+        candidates.append((idx, _pdf_title_score(line), stripped))
+    if not candidates:
+        return _select_title(fallback_lines)
+    priority = [item for item in candidates if item[1] >= 60.0]
+    if priority:
+        priority.sort(key=lambda item: (item[1], -item[0]), reverse=True)
+        return priority[0][2]
+    candidates.sort(key=lambda item: (item[1], -item[0]), reverse=True)
+    return candidates[0][2]
 
 
 def _summarize_visual_items(items: List[VisualItem]) -> List[str]:
@@ -119,10 +295,15 @@ def parse_pdf(path: Path) -> List[SlideContent]:
     slides: List[SlideContent] = []
     try:
         for i, page in enumerate(doc, start=1):
-            text = page.get_text("text")
-            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-            title = lines[0] if lines else ""
-            bullet_points = _extract_bullets(lines)
+            pdf_lines = _extract_pdf_lines(page)
+            raw_lines = [line.text for line in pdf_lines if line.text.strip()]
+            lines = []
+            for line in pdf_lines:
+                normalized = _normalize_content_line(line.text)
+                if normalized:
+                    lines.append(normalized)
+            title = _select_pdf_title(pdf_lines, lines)
+            bullet_points = _extract_bullets(raw_lines)
             visual_items = _extract_pdf_visual_items(page, i)
             slides.append(
                 SlideContent(
@@ -194,8 +375,12 @@ def parse_ppt(path: Path) -> List[SlideContent]:
                 if not p_text:
                     continue
                 texts.append(p_text)
-                if paragraph.level > 0 or p_text.startswith(("-", "•", "·", "*", "●")):
-                    bullet_points.append(p_text.lstrip("-•·*● "))
+                if paragraph.level > 0 or _looks_like_bullet(p_text):
+                    normalized = _strip_bullet_prefix(p_text)
+                    if normalized:
+                        bullet_points.append(normalized)
+        if not title_text:
+            title_text = _select_title(texts)
         slides.append(
             SlideContent(
                 slide_id=i,

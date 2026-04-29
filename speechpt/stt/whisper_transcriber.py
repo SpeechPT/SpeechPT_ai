@@ -1,6 +1,8 @@
 """Whisper-based STT wrapper with word-level timestamp output."""
 from __future__ import annotations
 
+import argparse
+import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -117,3 +119,37 @@ def transcribe_audio(audio_path: str | Path, config_dict: Dict[str, Any] | None 
     )
     transcriber = WhisperTranscriber(whisper_cfg)
     return transcriber.transcribe(audio_path)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Run Whisper STT and emit word-level timestamps as JSON")
+    parser.add_argument("--audio", required=True, help="Path to input audio")
+    parser.add_argument("--backend", default="faster-whisper", choices=["faster-whisper", "openai-whisper"])
+    parser.add_argument("--model", default="small", help="Whisper model name")
+    parser.add_argument("--language", default="ko")
+    parser.add_argument("--compute-type", default="int8")
+    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--output-json", default=None, help="Optional output path for transcript JSON")
+    args = parser.parse_args()
+
+    result = transcribe_audio(
+        args.audio,
+        {
+            "backend": args.backend,
+            "model_name": args.model,
+            "language": args.language,
+            "compute_type": args.compute_type,
+            "device": args.device,
+        },
+    )
+    payload = json.dumps(result, ensure_ascii=False, indent=2)
+    if args.output_json:
+        out = Path(args.output_json)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(payload, encoding="utf-8")
+        logger.info("saved transcript json: %s", out)
+    print(payload)
+
+
+if __name__ == "__main__":
+    main()
