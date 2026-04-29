@@ -273,7 +273,7 @@ def main():
     parser.add_argument("--output-dir", default="", help="Local output dir (pipeline mode). Set to skip S3 upload.")
     parser.add_argument("--labels-s3-uri", default=os.environ.get("AE_LABELS_S3", ""))
     parser.add_argument("--audio-s3-uri", default=os.environ.get("AE_AUDIO_S3", ""))
-    parser.add_argument("--train-ratio", type=float, default=0.8)
+    parser.add_argument("--train-ratio", type=float, default=0.9)
     parser.add_argument("--valid-ratio", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-files", type=int, default=0)
@@ -291,8 +291,8 @@ def main():
     s3_rescue_on_empty = args.s3_rescue_on_empty.lower() == "true"
 
     test_ratio = 1.0 - args.train_ratio - args.valid_ratio
-    if args.train_ratio <= 0 or args.valid_ratio <= 0 or test_ratio <= 0:
-        raise ValueError("train/valid/test ratios must be positive and sum to 1")
+    if args.train_ratio <= 0 or args.valid_ratio <= 0 or test_ratio < 0:
+        raise ValueError("train/valid ratios must be positive and sum to <= 1")
 
     label_dir = Path(args.labels_dir)
     audio_dir = Path(args.audio_dir)
@@ -437,11 +437,10 @@ def main():
     if n_train + n_valid >= n:
         n_valid = max(1, n - n_train - 1)
     n_test = n - n_train - n_valid
-    if n_test <= 0:
-        if n_train > n_valid:
-            n_train -= 1
-        else:
-            n_valid -= 1
+    if n_test < 0:
+        # train + valid이 n보다 큰 경우 valid에서 조정
+        n_valid = max(1, n - n_train)
+        n_test = 0
 
     train_rows = rows[:n_train]
     valid_rows = rows[n_train : n_train + n_valid]
@@ -461,7 +460,8 @@ def main():
     write_jsonl(all_path, rows)
     write_jsonl(train_path, train_rows)
     write_jsonl(valid_path, valid_rows)
-    write_jsonl(test_path, test_rows)
+    if test_rows:
+        write_jsonl(test_path, test_rows)
 
     # Validation 데이터 처리 (별도 AIHub Validation 세트 → eval_validation.jsonl)
     eval_val_rows: list[dict] = []
@@ -484,7 +484,8 @@ def main():
         s3.upload_file(str(all_path), bucket, f"{prefix}all.jsonl")
         s3.upload_file(str(train_path), bucket, f"{prefix}train.jsonl")
         s3.upload_file(str(valid_path), bucket, f"{prefix}valid.jsonl")
-        s3.upload_file(str(test_path), bucket, f"{prefix}test.jsonl")
+        if test_rows:
+            s3.upload_file(str(test_path), bucket, f"{prefix}test.jsonl")
         if eval_val_rows:
             s3.upload_file(str(out_dir / "eval_validation.jsonl"), bucket, f"{prefix}eval_validation.jsonl")
 

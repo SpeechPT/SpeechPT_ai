@@ -109,7 +109,7 @@ ml.c5.4xlarge        ml.g5.2xlarge        ml.g5.xlarge         자동 판정    
  Validation 처리)     또는 LoRA)           독립 평가셋)          >= 50%)              Group에 등록)
 ```
 
-- **Training 데이터** (84,134건): 학습용 (8:1:1 → train/valid/test 분할)
+- **Training 데이터** (68,078건): 학습용 (9:1 → train/valid 분할)
 - **Validation 데이터** (8,028건): 독립 평가셋 (eval_validation.jsonl)
 
 ### 파이프라인 실행
@@ -145,7 +145,7 @@ python pipeline_ae.py --upsert-only
 ### LoRA 파인튜닝
 
 LoRA는 wav2vec2 backbone의 q_proj/v_proj에 경량 어댑터를 추가하여 학습하는 방식.
-Linear Probing(20만 파라미터)과 달리 LoRA는 ~300만 파라미터를 추가로 학습한다.
+Linear Probing(26만 파라미터)과 달리 LoRA는 ~157만 파라미터를 추가로 학습한다.
 
 ```bash
 # LoRA 기본 실행
