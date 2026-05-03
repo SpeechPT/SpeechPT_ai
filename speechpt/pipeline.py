@@ -81,11 +81,124 @@ class SpeechPTPipeline:
                 best[k] = kp
         return list(best.values())
 
+    def _auto_align_slides(self, slides, slide_keypoints, words) -> list[float]:
+        """STT 트랜스크립트와 슬라이드 키포인트 간의 시맨틱 유사도를 분석하여 자동으로 슬라이드 경계를 추정한다."""
+        if not slides or not words:
+            return [0.0] * len(slides)
+
+        # 1. 트랜스크립트를 약 10초 단위의 청크로 분할
+        duration = 10.0
+        chunks = []
+        current_chunk = []
+        current_start = float(words[0].get("start", 0.0)) if words else 0.0
+        
+        for w in words:
+            w_start = float(w.get("start", 0.0))
+            if current_chunk and (w_start - current_start) >= duration:
+                chunks.append({
+                    "start": float(current_chunk[0].get("start", 0.0)),
+                    "end": float(current_chunk[-1].get("end", 0.0)),
+                    "text": " ".join([str(cw.get("word", "")) for cw in current_chunk])
+                })
+                current_chunk = [w]
+                current_start = w_start
+            else:
+                current_chunk.append(w)
+                
+        if current_chunk:
+            chunks.append({
+                "start": float(current_chunk[0].get("start", 0.0)),
+                "end": float(current_chunk[-1].get("end", 0.0)),
+                "text": " ".join([str(cw.get("word", "")) for cw in current_chunk])
+            })
+
+        if not chunks:
+            return [0.0] * len(slides)
+
+        # 2. 임베딩 계산 (jhgan/ko-sroberta-multitask 모델 활용)
+        import numpy as np
+        from sklearn.metrics.pairwise import cosine_similarity
+        from speechpt.coherence.coherence_scorer import _get_model
+        
+        model_name = self.ce_cfg.get("model_name", "jhgan/ko-sroberta-multitask")
+        model = _get_model(model_name)
+
+        chunk_texts = [c["text"] for c in chunks]
+        chunk_emb = model.encode(chunk_texts, convert_to_numpy=True, normalize_embeddings=True)
+
+        slide_embs = []
+        for kps in slide_keypoints:
+            if kps:
+                kp_texts = [kp.text for kp in kps]
+                kp_imp = np.array([kp.importance for kp in kps], dtype=float)
+                embs = model.encode(kp_texts, convert_to_numpy=True, normalize_embeddings=True)
+                weighted = (embs.T * kp_imp).T
+                avg_emb = weighted.sum(axis=0) / (kp_imp.sum() + 1e-8)
+                norm = np.linalg.norm(avg_emb)
+                if norm > 0:
+                    avg_emb /= norm
+                slide_embs.append(avg_emb)
+            else:
+                slide_embs.append(np.zeros(chunk_emb.shape[1]))
+                
+        slide_emb = np.vstack(slide_embs)
+        
+        # 3. 유사도 행렬 계산 (Chunks x Slides)
+        S = cosine_similarity(chunk_emb, slide_emb)
+
+        # 4. 동적 계획법(DP)을 이용한 최적 단조 정렬 경로 탐색
+        N = len(chunks)
+        M = len(slides)
+        
+        dp = np.full((N, M), -np.inf)
+        backptr = np.zeros((N, M), dtype=int)
+
+        for j in range(M):
+            dp[0, j] = S[0, j]
+
+        for i in range(1, N):
+            for j in range(M):
+                best_k = 0
+                best_val = -np.inf
+                for k in range(j + 1):
+                    # 슬라이드를 건너뛸 때 약간의 패널티 부여 (순차 진행 장려)
+                    penalty = 0.0
+                    if k < j:
+                        penalty = -0.1 * (j - k)
+                    val = dp[i-1, k] + penalty
+                    if val > best_val:
+                        best_val = val
+                        best_k = k
+                dp[i, j] = S[i, j] + best_val
+                backptr[i, j] = best_k
+
+        # 최적 경로 역추적 (Backtracking)
+        j = int(np.argmax(dp[N-1]))
+        assignments = [0] * N
+        for i in range(N - 1, -1, -1):
+            assignments[i] = j
+            j = backptr[i, j]
+
+        # 5. 각 슬라이드의 시작 타임스탬프 추출
+        timestamps = [0.0] * M
+        for k in range(1, M):
+            first_idx = -1
+            for i in range(N):
+                if assignments[i] >= k:
+                    first_idx = i
+                    break
+            if first_idx != -1:
+                timestamps[k] = chunks[first_idx]["start"]
+            else:
+                timestamps[k] = chunks[-1]["end"]
+
+        return timestamps
+
     def analyze(
         self,
         document_path: str,
         audio_path: str,
-        slide_timestamps: Sequence[float],
+        slide_timestamps: Sequence[float] | None = None,
         whisper_result: Dict | None = None,
     ) -> SpeechReport:
         whisper_result = self._resolve_whisper_result(audio_path, whisper_result)
@@ -108,6 +221,13 @@ class SpeechPTPipeline:
         done = self._time("keypoint_extraction")
         slide_keypoints = [self._build_slide_keypoints(slide) for slide in slides]
         done()
+
+        # 자동 정렬 수행
+        if not slide_timestamps:
+            done = self._time("auto_slide_alignment")
+            slide_timestamps = self._auto_align_slides(slides, slide_keypoints, words)
+            logger.info("Auto-aligned slide timestamps: %s", [round(t, 2) for t in slide_timestamps])
+            done()
 
         done = self._time("transcript_alignment")
         segments = transcript_aligner.align_transcript(words, slide_timestamps)
@@ -207,8 +327,8 @@ def main():
     parser.add_argument("--audio", required=True, help="Path to audio file")
     parser.add_argument(
         "--slide-timestamps",
-        required=True,
-        help="Comma-separated slide boundaries in seconds, e.g. 0,30,60,90",
+        default=None,
+        help="Comma-separated slide boundaries in seconds, e.g. 0,30,60,90. If omitted, auto-alignment is used.",
     )
     parser.add_argument(
         "--whisper-json",
@@ -224,7 +344,10 @@ def main():
     parser.add_argument("--save-whisper-json", default=None, help="Optional path to save the STT result JSON")
     args = parser.parse_args()
 
-    slide_timestamps = [float(x.strip()) for x in args.slide_timestamps.split(",") if x.strip()]
+    slide_timestamps = None
+    if args.slide_timestamps:
+        slide_timestamps = [float(x.strip()) for x in args.slide_timestamps.split(",") if x.strip()]
+
     whisper_result = None
     if args.whisper_json:
         whisper_result = json.loads(Path(args.whisper_json).read_text())
