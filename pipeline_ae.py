@@ -194,6 +194,11 @@ def create_pipeline(args) -> Pipeline:
                 destination="/opt/ml/processing/input/data/",
                 input_name="data",
             ),
+            ProcessingInput(
+                source=VAL_AUDIO_S3,
+                destination="/opt/ml/processing/input/audio/",
+                input_name="audio",
+            ),
         ],
         outputs=[
             ProcessingOutput(
@@ -211,7 +216,7 @@ def create_pipeline(args) -> Pipeline:
             "--eval-file", "eval_validation.jsonl",
             "--audio-s3", VAL_AUDIO_S3,
             "--chunk-sec", "20",
-            "--batch-size", "2",
+            "--batch-size", "16",
         ],
     )
 
