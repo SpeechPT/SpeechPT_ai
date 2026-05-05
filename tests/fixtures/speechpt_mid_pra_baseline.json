@@ -1,0 +1,66 @@
+{
+  "case": "SpeechPT_중간발표",
+  "mode": "pra_vlm_free",
+  "slide_count": 8,
+  "audio_end_sec": 252.71,
+  "manual_reference_segments_sec": [
+    {
+      "slide_index": 1,
+      "start": 0.0,
+      "end": 14.0
+    },
+    {
+      "slide_index": 2,
+      "start": 14.0,
+      "end": 40.0
+    },
+    {
+      "slide_index": 3,
+      "start": 42.0,
+      "end": 84.0
+    },
+    {
+      "slide_index": 4,
+      "start": 84.0,
+      "end": 125.0
+    },
+    {
+      "slide_index": 5,
+      "start": 124.0,
+      "end": 172.0
+    },
+    {
+      "slide_index": 6,
+      "start": 171.0,
+      "end": 225.0
+    },
+    {
+      "slide_index": 7,
+      "start": 217.0,
+      "end": 248.0
+    },
+    {
+      "slide_index": 8,
+      "start": 248.0,
+      "end": 252.0
+    }
+  ],
+  "boundaries": [
+    0.0,
+    26.64,
+    43.08,
+    76.98,
+    124.75,
+    164.09,
+    217.11,
+    248.91,
+    252.71
+  ],
+  "warnings": [],
+  "mean_confidence": 0.034541365013753475,
+  "low_confidence_count": 31,
+  "known_weaknesses": [
+    "S1/S2 boundary is late because cover anchor follows an utterance past the cover window.",
+    "S5/S6 boundary is early because a pause-driven chunk at 164.09s is absorbed into slide 6."
+  ]
+}

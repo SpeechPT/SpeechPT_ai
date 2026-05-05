@@ -19,6 +19,7 @@ artifacts/
 eval/results/
 reports/
 *.log
+key
 
 # Editor / OS
 .DS_Store
@@ -28,3 +29,5 @@ reports/
 dataset.md
 ML.md
 sagemaker.md
+
+cache/

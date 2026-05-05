@@ -25,7 +25,7 @@ def _normalize_boundaries(slide_change_times: List[float]) -> List[float]:
     if not slide_change_times:
         return []
 
-    cleaned = sorted({float(t) for t in slide_change_times if t is not None})
+    cleaned = sorted(float(t) for t in slide_change_times if t is not None)
     if len(cleaned) < 2:
         return cleaned
     return cleaned

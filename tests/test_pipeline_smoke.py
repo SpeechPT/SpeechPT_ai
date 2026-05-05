@@ -7,10 +7,12 @@ import pytest
 from speechpt.attitude.attitude_scorer import SegmentAttitude
 from speechpt.attitude.audio_feature_extractor import AudioFeatures
 from speechpt.attitude.change_point_detector import ChangePoint
+from speechpt.coherence.auto_aligner import AlignmentResult
 from speechpt.coherence.coherence_scorer import SlideCoherenceResult
 from speechpt.coherence.document_parser import SlideContent
 from speechpt.coherence.keypoint_extractor import Keypoint
 from speechpt.coherence.transcript_aligner import TranscriptSegment
+from speechpt.coherence.vlm_caption import VlmCaptionResult, VlmPresentationCaption, VlmSection, VlmSlideCaption
 from speechpt.pipeline import SpeechPTPipeline
 
 
@@ -263,3 +265,158 @@ def test_pipeline_keeps_all_slides_when_middle_segment_is_empty(monkeypatch, tmp
 
     assert len(report.per_slide_detail) == 3
     assert report.per_slide_detail[1]["slide_id"] == 2
+
+
+def test_pipeline_hybrid_alignment_includes_alignment_metadata(monkeypatch, tmp_path: Path):
+    cfg = {
+        "version": "0.3.0",
+        "coherence": {
+            "model_name": "dummy",
+            "threshold": 0.55,
+            "alignment": {"mode": "hybrid"},
+        },
+        "attitude": {"wav2vec2": {"use_probe": False}},
+        "stt": {"enabled": False},
+        "report": {"template": "speechpt/report/templates/feedback_ko.yaml"},
+    }
+    cfg_path = tmp_path / "pipeline.yaml"
+    cfg_path.write_text(json.dumps(cfg))
+
+    _patch_core(monkeypatch)
+    monkeypatch.setattr(
+        "speechpt.pipeline.auto_aligner.resolve_alignment",
+        lambda **kwargs: AlignmentResult(
+            mode="hybrid",
+            strategy_used="manual_with_auto_proposal",
+            final_boundaries=[0.0, 5.0],
+            provided_boundaries=[0.0, 5.0],
+            proposed_boundaries=[0.0, 4.2],
+            confidence=0.82,
+            unit_assignments=[{"unit_id": 0, "slide_id": 1, "start_sec": 0.0, "end_sec": 4.2}],
+        ),
+    )
+
+    pipeline = SpeechPTPipeline(str(cfg_path))
+    report = pipeline.analyze(
+        document_path="dummy.pdf",
+        audio_path="dummy.wav",
+        slide_timestamps=[0.0, 5.0],
+        whisper_result={"words": [{"word": "포인트", "start": 0.0, "end": 0.2}]},
+    )
+
+    assert report.alignment["mode"] == "hybrid"
+    assert report.alignment["strategy_used"] == "manual_with_auto_proposal"
+    assert report.alignment["proposed_boundaries"] == [0.0, 4.2]
+
+
+def test_pipeline_uses_vlm_captions_for_alignment_only(monkeypatch, tmp_path: Path):
+    cfg = {
+        "version": "0.3.0",
+        "coherence": {
+            "model_name": "dummy",
+            "threshold": 0.55,
+            "alignment": {"mode": "auto"},
+            "vlm_caption": {"enabled": True},
+        },
+        "attitude": {"wav2vec2": {"use_probe": False}},
+        "stt": {"enabled": False},
+        "report": {"template": "speechpt/report/templates/feedback_ko.yaml"},
+    }
+    cfg_path = tmp_path / "pipeline.yaml"
+    cfg_path.write_text(json.dumps(cfg))
+
+    monkeypatch.setattr(
+        "speechpt.pipeline.document_parser.parse_document",
+        lambda _: [SlideContent(slide_id=1, text="내용", title="제목", bullet_points=["포인트"])],
+    )
+    monkeypatch.setattr(
+        "speechpt.pipeline.keypoint_extractor.extract_keypoints",
+        lambda _: [Keypoint(text="포인트", importance=1.0, source="title")],
+    )
+    monkeypatch.setattr(
+        "speechpt.pipeline.vlm_caption.caption_document",
+        lambda *args, **kwargs: VlmCaptionResult(
+            presentation=VlmPresentationCaption(
+                topic="테스트",
+                core_terminology=["알파"],
+                sections=[VlmSection(name="전체", slide_indices=[1])],
+                model="mock-model",
+            ),
+            slides=[
+                VlmSlideCaption(
+                    slide_id=1,
+                    slide_type="chart",
+                    role_in_flow="결과를 설명한다.",
+                    main_claim="성능이 개선되었다.",
+                    visual_kind="line_chart",
+                    visual_summary="결과 그래프",
+                    entities=["알파"],
+                    likely_keywords_in_speech=["알파", "결과"],
+                    model="mock-model",
+                )
+            ],
+        ),
+    )
+
+    captured_alignment_sources = []
+
+    def fake_resolve_alignment(**kwargs):
+        captured_alignment_sources.extend(kp.source for kp in kwargs["slide_keypoints"][0])
+        return AlignmentResult(
+            mode="auto",
+            strategy_used="auto",
+            final_boundaries=[0.0, 5.0],
+            proposed_boundaries=[0.0, 5.0],
+        )
+
+    captured_scoring_sources = []
+
+    def fake_score_slide(keypoints, segment, **kwargs):
+        captured_scoring_sources.extend(kp.source for kp in keypoints)
+        return SlideCoherenceResult(slide_id=segment.slide_id, coverage=0.9, missed_keypoints=[], evidence_spans=[])
+
+    monkeypatch.setattr("speechpt.pipeline.auto_aligner.resolve_alignment", fake_resolve_alignment)
+    monkeypatch.setattr(
+        "speechpt.pipeline.transcript_aligner.align_transcript",
+        lambda words, times: [TranscriptSegment(slide_id=1, start_sec=0.0, end_sec=5.0, text="포인트", words=words)],
+    )
+    monkeypatch.setattr("speechpt.pipeline.coherence_scorer.score_slide", fake_score_slide)
+    monkeypatch.setattr(
+        "speechpt.pipeline.extract_audio_features",
+        lambda *args, **kwargs: AudioFeatures(
+            duration_sec=5.0,
+            pitch=[100.0],
+            energy=[-10.0],
+            speech_rate_per_sec=[3.0],
+            silence_mask=[False],
+            frame_times=[0.0],
+        ),
+    )
+    monkeypatch.setattr("speechpt.pipeline.detect_change_points", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        "speechpt.pipeline.score_attitude",
+        lambda *args, **kwargs: [
+            SegmentAttitude(
+                slide_id=1,
+                start_sec=0.0,
+                end_sec=5.0,
+                features={"avg_speech_rate": 3.0, "silence_ratio": 0.0},
+                change_points=[],
+                trend_label="stable",
+                anomaly_flags=[],
+                fillers=[],
+            )
+        ],
+    )
+
+    pipeline = SpeechPTPipeline(str(cfg_path))
+    pipeline.analyze(
+        document_path="dummy.pdf",
+        audio_path="dummy.wav",
+        whisper_result={"words": [{"word": "포인트", "start": 0.0, "end": 0.2}]},
+    )
+
+    assert "vlm_claim" in captured_alignment_sources
+    assert "vlm_visual" in captured_alignment_sources
+    assert "vlm_role" in captured_alignment_sources
+    assert not any(source.startswith("vlm_") for source in captured_scoring_sources)
