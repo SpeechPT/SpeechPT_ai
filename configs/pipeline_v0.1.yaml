@@ -3,6 +3,79 @@ coherence:
   model_name: jhgan/ko-sroberta-multitask
   threshold: 0.55
   chunk_max_len: 120
+  alignment:
+    mode: hybrid
+    pause_threshold_sec: 0.9
+    chunk_min_duration_sec: 2.0
+    chunk_max_duration_sec: 8.0
+    chunk_min_words: 3
+    chunk_max_words: 36
+    min_first_chunk_sec: 2.0
+    min_last_chunk_sec: 2.0
+    switch_penalty: 0.08
+    skip_penalty: 0.15
+    extra_skip_penalty: 0.4
+    start_skip_penalty: 2.0
+    allow_skip: true
+    max_slide_jump: 2
+    min_dwell_units: 2
+    stay_bonus: 0.05
+    progress_penalty: 0.35
+    lag_penalty_multiplier: 1.6
+    anchor_cover_slide: true
+    cover_min_window: 8.0
+    cover_max_window: 20.0
+    cover_ratio: 0.15
+    cover_prefer_first_unit: true
+    cover_first_unit_min_sec: 3.0
+    cover_stop_on_next_title: true
+    anchor_thanks_slide: true
+    thanks_search_start_ratio: 0.85
+    closing_cues: ["감사합니다", "들어주셔", "이상입니", "마치겠습니", "감사드립니"]
+    confidence_min_similarity: 0.35
+    confidence_min_margin: 0.10
+    use_multi_signal_similarity: true
+    short_title_max_words: 2
+    short_title_max_chars: 6
+    short_title_weight: 0.55
+    default_title_weight: 0.35
+    semantic_weight: 0.7
+    lexical_weight: 0.2
+    title_hit_weight: 0.1
+    body_semantic_weight: 0.5
+    keyword_semantic_weight: 0.3
+    visual_semantic_weight: 0.2
+    smoothing_enabled: true
+    smoothing_margin_threshold: 0.10
+    smoothing_max_units: 2
+    smoothing_preserve_assigned_slides: true
+    absorb_pause_chunks_enabled: true
+    absorb_min_chunk_sec: 3.0
+    absorb_edge_max_sec: 9.0
+    absorb_max_chunk_utts: 2
+    absorb_margin_threshold: 0.05
+    title_cue_boundary_refinement_enabled: true
+    title_cue_refine_min_offset_sec: 1.0
+    title_cue_search_max_units: 4
+    title_cue_allow_first_token_fallback: true
+    vlm_semantic_mix_weight: 0.35
+    vlm_title_claim_weight: 0.30
+    vlm_title_role_weight: 0.20
+    vlm_default_claim_weight: 0.50
+    vlm_default_role_weight: 0.30
+    vlm_default_visual_weight: 0.20
+    vlm_visual_claim_weight: 0.40
+    vlm_visual_role_weight: 0.20
+    vlm_visual_visual_weight: 0.40
+    vlm_boundary_influence_enabled: false
+  vlm_caption:
+    enabled: false
+    model: gpt-4.1-mini
+    detail: low
+    cache_enabled: true
+    timeout_sec: 60
+    dpi: 144
+    cache_dir: cache/vlm_captions
   visual:
     enabled: false
     ocr_engine: easyocr

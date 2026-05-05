@@ -1,0 +1,89 @@
+{
+  "case": "SpeechPT_중간발표",
+  "description": "User-validated slide boundary fixture for SpeechPT mid-presentation generalization check.",
+  "source_files": {
+    "pdf": "/Users/kimdk444/Downloads/SpeechPT_중간발표.pdf",
+    "audio": "/Users/kimdk444/Downloads/2026-1 SpeechPT 중간교류회 - 아주대학교_교육혁신팀.mp3"
+  },
+  "slide_count": 8,
+  "audio_end_sec": 252.71,
+  "manual_tolerance_sec": 2.0,
+  "manual_segments_sec": [
+    {
+      "slide_index": 1,
+      "title": "발표를데이터로분석하는AI코치",
+      "start": 0.0,
+      "end": 14.0
+    },
+    {
+      "slide_index": 2,
+      "title": "팀소개",
+      "start": 14.0,
+      "end": 40.0
+    },
+    {
+      "slide_index": 3,
+      "title": "프로젝트소개",
+      "start": 42.0,
+      "end": 84.0
+    },
+    {
+      "slide_index": 4,
+      "title": "기존방법의한계",
+      "start": 84.0,
+      "end": 125.0
+    },
+    {
+      "slide_index": 5,
+      "title": "해결방법",
+      "start": 124.0,
+      "end": 172.0
+    },
+    {
+      "slide_index": 6,
+      "title": "진행현황",
+      "start": 171.0,
+      "end": 225.0
+    },
+    {
+      "slide_index": 7,
+      "title": "향후계획및기대효과",
+      "start": 217.0,
+      "end": 248.0
+    },
+    {
+      "slide_index": 8,
+      "title": "감사합니다",
+      "start": 248.0,
+      "end": 252.0
+    }
+  ],
+  "manual_notes": [
+    "User noted that the manually reviewed boundaries may have about 1-2 seconds of error.",
+    "Manual segments intentionally preserve small overlaps/gaps from human listening review.",
+    "Around 164s there is a pause, but the content still belongs to the solution/AE explanation; true progress-status cue starts closer to 174s."
+  ],
+  "pra_vlm_free_result": {
+    "generated_at": "2026-05-04",
+    "result_path": "/tmp/speechpt_mid_ce/ce_alignment_pra_result.json",
+    "boundaries": [
+      0.0,
+      26.64,
+      43.08,
+      76.98,
+      124.75,
+      164.09,
+      217.11,
+      248.91,
+      252.71
+    ],
+    "warnings": [],
+    "mean_confidence": 0.034541365013753475,
+    "low_confidence_count": 31
+  },
+  "observed_error_pattern": [
+    "S1/S2 boundary is too late because the cover anchor absorbs the beginning of team introduction.",
+    "S5/S6 boundary is too early because a pause at 164.09s is treated like a slide transition even though the progress-status cue appears later.",
+    "S7/S8 boundary is close to the manual reference."
+  ]
+}

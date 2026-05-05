@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, List, Sequence
 
@@ -25,6 +25,7 @@ class SpeechReport:
     highlight_sections: List[Dict]
     per_slide_detail: List[Dict]
     global_summary: Dict
+    alignment: Dict = field(default_factory=dict)
 
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -165,6 +166,7 @@ def generate_report(
     ae_results: Sequence[SegmentAttitude],
     template_path: str | Path,
     version: str = "0.3.0",
+    alignment: Dict | None = None,
 ) -> SpeechReport:
     templates = _load_templates(Path(template_path))
     issue_templates = templates.get("issue_templates", [])
@@ -255,6 +257,7 @@ def generate_report(
         highlight_sections=highlights,
         per_slide_detail=per_slide,
         global_summary=global_summary,
+        alignment=alignment or {},
     )
 
 

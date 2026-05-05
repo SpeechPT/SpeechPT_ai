@@ -29,3 +29,21 @@ def test_align_transcript_returns_boundary_based_empty_segments_when_no_words():
     assert segments[1].start_sec == 4.0
     assert segments[1].end_sec == 9.0
     assert all("empty_segment" in seg.warning_flags for seg in segments)
+
+
+def test_align_transcript_preserves_duplicate_boundaries_as_empty_segments():
+    words = [
+        {"word": "앞", "start": 0.5, "end": 0.8},
+        {"word": "뒤", "start": 6.0, "end": 6.4},
+    ]
+
+    segments = align_transcript(words, [0.0, 5.0, 5.0, 10.0])
+
+    assert len(segments) == 3
+    assert segments[0].start_sec == 0.0
+    assert segments[0].end_sec == 5.0
+    assert segments[1].start_sec == 5.0
+    assert segments[1].end_sec == 5.0
+    assert segments[1].text == ""
+    assert "empty_segment" in segments[1].warning_flags
+    assert segments[2].text == "뒤"
