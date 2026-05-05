@@ -24,10 +24,10 @@ Output:
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Pattern, Sequence, Tuple
 
 # 한국어 간투사 패턴 — 단독 출현 또는 짧은 반복형 포함
-_FILLER_PATTERNS = [
+DEFAULT_FILLER_PATTERNS = [
     r"^어+$",       # 어, 어어, 어어어
     r"^음+$",       # 음, 음음
     r"^아+$",       # 아, 아아
@@ -44,17 +44,25 @@ _FILLER_PATTERNS = [
     r"^있잖아요$",
 ]
 
-_COMPILED = [re.compile(p) for p in _FILLER_PATTERNS]
+
+def _compile_patterns(patterns: Sequence[str] | None = None) -> List[Pattern[str]]:
+    raw_patterns = list(DEFAULT_FILLER_PATTERNS)
+    if patterns:
+        raw_patterns.extend(str(pattern) for pattern in patterns)
+    # Preserve order while removing duplicate pattern strings.
+    deduped = list(dict.fromkeys(raw_patterns))
+    return [re.compile(pattern) for pattern in deduped]
 
 
-def is_filler(word: str) -> bool:
+def is_filler(word: str, patterns: Sequence[str] | None = None) -> bool:
     w = word.strip().lower()
-    return any(p.match(w) for p in _COMPILED)
+    return any(pattern.fullmatch(w) for pattern in _compile_patterns(patterns))
 
 
 def detect_fillers(
-    words: List[Dict],
+    words: Sequence[Dict],
     slide_timestamps: Optional[List[float]] = None,
+    patterns: Sequence[str] | None = None,
 ) -> Dict:
     """간투사를 탐지하고 슬라이드 섹션별로 집계한다.
 
@@ -62,6 +70,7 @@ def detect_fillers(
         words: [{"word": str, "start": float, "end": float}, ...]
         slide_timestamps: 슬라이드 경계 초 리스트. 예: [0, 40, 50, 90]
                           None이면 슬라이드 분류 없이 전체 집계만 반환.
+        patterns: 추가 filler 정규식. 기본 한국어 filler 패턴에 합산된다.
 
     Returns:
         탐지 결과 dict.
@@ -79,9 +88,11 @@ def detect_fillers(
                 return sid
         return None
 
+    compiled = _compile_patterns(patterns)
     filler_words = []
     for w in words:
-        if is_filler(w.get("word", "")):
+        token = str(w.get("word", "")).strip().lower()
+        if any(pattern.fullmatch(token) for pattern in compiled):
             entry = {
                 "word": w["word"],
                 "start": w.get("start", 0.0),

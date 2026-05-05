@@ -4,15 +4,15 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Pattern, Sequence
+from typing import Dict, List, Sequence
 
 import numpy as np
 
 from .audio_feature_extractor import AudioFeatures
 from .change_point_detector import ChangePoint
+from .filler_detector import detect_fillers
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -36,21 +36,6 @@ class SegmentAttitude:
     @property
     def word_count(self) -> int:
         return int(self.features.get("word_count", 0))
-
-
-def _compile_patterns(patterns: Sequence[str]) -> List[Pattern[str]]:
-    return [re.compile(pattern) for pattern in patterns]
-
-
-def filler_detector(words: Sequence[Dict], patterns: Sequence[Pattern[str]]) -> List[Dict]:
-    hits = []
-    for word_item in words:
-        text = str(word_item.get("word", ""))
-        for pattern in patterns:
-            if pattern.fullmatch(text):
-                hits.append({"word": text, "time_sec": float(word_item.get("start", 0.0))})
-                break
-    return hits
 
 
 def _zscore_series(x: np.ndarray) -> tuple[float, float]:
@@ -129,8 +114,16 @@ def score_attitude(
         "speech_rate_per_sec": _zscore_series(audio_features.speech_rate_per_sec),
     }
 
-    compiled_patterns = _compile_patterns(filler_patterns)
-    fillers_all = filler_detector(words, compiled_patterns)
+    filler_result = detect_fillers(words, patterns=filler_patterns)
+    fillers_all = [
+        {
+            "word": item.get("word", ""),
+            "time_sec": float(item.get("start", 0.0)),
+            "start": float(item.get("start", 0.0)),
+            "end": float(item.get("end", item.get("start", 0.0))),
+        }
+        for item in filler_result.get("filler_words", [])
+    ]
 
     results: List[SegmentAttitude] = []
     for segment in segments:

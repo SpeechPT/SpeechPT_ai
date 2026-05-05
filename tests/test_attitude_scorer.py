@@ -68,3 +68,26 @@ def test_score_attitude_adds_relative_dwell_features():
     assert result[0].features["dwell_z"] < 0
     assert result[-1].features["dwell_z"] > 0
     assert [seg.features["word_count"] for seg in result] == [1, 1, 2]
+
+
+def test_score_attitude_uses_shared_filler_detector_patterns():
+    frame_times = np.array([0.0, 1.0, 2.0, 3.0])
+    feats = AudioFeatures(
+        duration_sec=3.0,
+        pitch=np.ones_like(frame_times),
+        energy=np.ones_like(frame_times),
+        speech_rate_per_sec=np.ones_like(frame_times),
+        silence_mask=np.zeros_like(frame_times, dtype=bool),
+        frame_times=frame_times,
+    )
+    segments = [{"slide_id": 1, "start_sec": 0.0, "end_sec": 3.0}]
+    words = [
+        {"word": "어어", "start": 0.5, "end": 0.7},
+        {"word": "그러니까", "start": 1.0, "end": 1.4},
+        {"word": "음악", "start": 1.8, "end": 2.0},
+    ]
+
+    result = score_attitude(feats, segments, change_points=[], words=words, config={})
+
+    assert result[0].features["filler_count"] == 2
+    assert [item["word"] for item in result[0].fillers] == ["어어", "그러니까"]
