@@ -29,6 +29,14 @@ class SegmentAttitude:
     anomaly_flags: List[str]
     fillers: List[Dict]
 
+    @property
+    def dwell_sec(self) -> float:
+        return max(0.0, self.end_sec - self.start_sec)
+
+    @property
+    def word_count(self) -> int:
+        return int(self.features.get("word_count", 0))
+
 
 def _compile_patterns(patterns: Sequence[str]) -> List[Pattern[str]]:
     return [re.compile(pattern) for pattern in patterns]
@@ -82,6 +90,22 @@ def _attach_wav2vec_features(
     norms = np.linalg.norm(seg_emb, axis=1)
     result.features["wav2vec_norm_mean"] = float(np.mean(norms))
     result.features["wav2vec_norm_std"] = float(np.std(norms))
+
+
+def _attach_dwell_features(results: Sequence[SegmentAttitude]) -> None:
+    if not results:
+        return
+    dwell_values = np.array([seg.dwell_sec for seg in results], dtype=float)
+    total_duration = float(np.sum(dwell_values))
+    mean_dwell = float(np.mean(dwell_values)) if len(dwell_values) else 0.0
+    std_dwell = float(np.std(dwell_values))
+
+    for seg in results:
+        dwell_sec = seg.dwell_sec
+        seg.features["dwell_sec"] = dwell_sec
+        seg.features["dwell_ratio"] = dwell_sec / total_duration if total_duration > 0 else 0.0
+        seg.features["dwell_z"] = (dwell_sec - mean_dwell) / std_dwell if std_dwell > 1e-8 else 0.0
+        seg.features["words_per_sec"] = seg.word_count / max(dwell_sec, 0.1)
 
 
 def score_attitude(
@@ -144,7 +168,9 @@ def score_attitude(
 
         segment_cps = [cp for cp in change_points if start <= cp.time_sec <= end]
         segment_fillers = [f for f in fillers_all if start <= f["time_sec"] <= end]
+        segment_words = [w for w in words if start <= float(w.get("start", 0.0)) < end]
         features["filler_count"] = len(segment_fillers)
+        features["word_count"] = len(segment_words)
 
         result = SegmentAttitude(
             slide_id=int(segment.get("slide_id", 0)),
@@ -158,6 +184,7 @@ def score_attitude(
         )
         _attach_wav2vec_features(result, wav2vec_embeddings, wav2vec_times)
         results.append(result)
+    _attach_dwell_features(results)
     return results
 
 

@@ -30,3 +30,41 @@ def test_score_attitude_flags_anomalies_and_fillers():
     assert seg.trend_label in {"declining_energy", "decreasing_speed"}
     assert seg.features["filler_count"] == 1
     assert len(seg.change_points) == 1
+    assert seg.dwell_sec == 3.0
+    assert seg.features["dwell_sec"] == 3.0
+    assert seg.features["dwell_ratio"] == 1.0
+    assert seg.features["dwell_z"] == 0.0
+    assert seg.features["word_count"] == 2
+    assert seg.word_count == 2
+    assert seg.features["words_per_sec"] == 2 / 3.0
+
+
+def test_score_attitude_adds_relative_dwell_features():
+    frame_times = np.arange(0.0, 15.0, 1.0)
+    feats = AudioFeatures(
+        duration_sec=14.0,
+        pitch=np.ones_like(frame_times),
+        energy=np.ones_like(frame_times),
+        speech_rate_per_sec=np.ones_like(frame_times),
+        silence_mask=np.zeros_like(frame_times, dtype=bool),
+        frame_times=frame_times,
+    )
+    segments = [
+        {"slide_id": 1, "start_sec": 0.0, "end_sec": 2.0},
+        {"slide_id": 2, "start_sec": 2.0, "end_sec": 6.0},
+        {"slide_id": 3, "start_sec": 6.0, "end_sec": 14.0},
+    ]
+    words = [
+        {"word": "하나", "start": 0.5, "end": 0.6},
+        {"word": "둘", "start": 2.5, "end": 2.6},
+        {"word": "셋", "start": 7.0, "end": 7.1},
+        {"word": "넷", "start": 8.0, "end": 8.1},
+    ]
+
+    result = score_attitude(feats, segments, change_points=[], words=words, config={})
+
+    assert [seg.features["dwell_sec"] for seg in result] == [2.0, 4.0, 8.0]
+    assert np.isclose(sum(seg.features["dwell_ratio"] for seg in result), 1.0)
+    assert result[0].features["dwell_z"] < 0
+    assert result[-1].features["dwell_z"] > 0
+    assert [seg.features["word_count"] for seg in result] == [1, 1, 2]

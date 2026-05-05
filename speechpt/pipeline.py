@@ -267,6 +267,7 @@ class SpeechPTPipeline:
             template_path=self.report_tpl,
             version=self.cfg.get("version", "0.3.0"),
             alignment=alignment.to_dict(),
+            attitude_config=self.ae_cfg,
         )
         done()
 

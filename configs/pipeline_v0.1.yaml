@@ -101,6 +101,8 @@ attitude:
     anomaly_z_threshold: 1.5
     filler_patterns: ["음", "어", "그", "아", "그러니까", "뭐"]
     trend_slope_eps: 0.001
+    dwell_short_z_threshold: -1.5
+    dwell_long_z_threshold: 2.0
   wav2vec2:
     model_name: "facebook/wav2vec2-base"
     use_probe: false

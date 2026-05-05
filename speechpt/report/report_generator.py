@@ -38,6 +38,8 @@ ISSUE_WEIGHT = {
     "speed_drop": 2,
     "silence_excess": 1,
     "visual_not_explained": 2,
+    "dwell_short": 1,
+    "dwell_long": 1,
 }
 DEFAULT_TEMPLATE_TEXT = "슬라이드 {slide_id} 구간에 개선 포인트가 있습니다."
 
@@ -91,7 +93,15 @@ def _split_missed_keypoints(ce: SlideCoherenceResult | None) -> tuple[List[str],
     return text_missed, visual_missed
 
 
-def _issue_from_slide(ce: SlideCoherenceResult | None, ae: SegmentAttitude | None) -> List[Dict]:
+def _issue_from_slide(
+    ce: SlideCoherenceResult | None,
+    ae: SegmentAttitude | None,
+    config: Dict | None = None,
+) -> List[Dict]:
+    cfg = config or {}
+    scoring_cfg = cfg.get("scoring", cfg)
+    dwell_short_z = float(scoring_cfg.get("dwell_short_z_threshold", -1.5))
+    dwell_long_z = float(scoring_cfg.get("dwell_long_z_threshold", 2.0))
     issues: List[Dict] = []
     text_missed, visual_missed = _split_missed_keypoints(ce)
     source_missed = ce.source_missed_keypoints if ce and ce.source_missed_keypoints else {}
@@ -119,6 +129,12 @@ def _issue_from_slide(ce: SlideCoherenceResult | None, ae: SegmentAttitude | Non
             issues.append({"id": "filler_many", "filler_count": ae.features.get("filler_count", 0)})
         if any(cp.type.startswith("pitch") for cp in ae.change_points):
             issues.append({"id": "pitch_shift"})
+        dwell_z = float(ae.features.get("dwell_z", 0.0))
+        dwell_ratio_pct = f"{float(ae.features.get('dwell_ratio', 0.0)) * 100:.1f}"
+        if dwell_z < dwell_short_z:
+            issues.append({"id": "dwell_short", "dwell_ratio_pct": dwell_ratio_pct})
+        elif dwell_z > dwell_long_z:
+            issues.append({"id": "dwell_long", "dwell_ratio_pct": dwell_ratio_pct})
     return issues
 
 
@@ -146,6 +162,8 @@ def _template_id_for_issue(issue_id: str, ce: SlideCoherenceResult | None) -> st
         "filler_many": "filler_many",
         "pitch_shift": "pitch_shift",
         "visual_not_explained": "visual_not_explained",
+        "dwell_short": "dwell_short",
+        "dwell_long": "dwell_long",
     }
     return mapping.get(issue_id, "pacing_inconsistent")
 
@@ -167,6 +185,7 @@ def generate_report(
     template_path: str | Path,
     version: str = "0.3.0",
     alignment: Dict | None = None,
+    attitude_config: Dict | None = None,
 ) -> SpeechReport:
     templates = _load_templates(Path(template_path))
     issue_templates = templates.get("issue_templates", [])
@@ -185,7 +204,7 @@ def generate_report(
     for slide_id in sorted(set(list(ae_map.keys()) + list(ce_map.keys()))):
         ce = ce_map.get(slide_id)
         ae = ae_map.get(slide_id)
-        issues = _issue_from_slide(ce, ae)
+        issues = _issue_from_slide(ce, ae, config=attitude_config)
         issue_ids = [issue["id"] for issue in issues]
         severity = _severity_score(issue_ids)
 
@@ -220,6 +239,11 @@ def generate_report(
                 "source_missed": ce.source_missed_keypoints if ce and ce.source_missed_keypoints else {},
                 "speech_rate": ae.features.get("avg_speech_rate", None) if ae else None,
                 "silence_ratio": ae.features.get("silence_ratio", None) if ae else None,
+                "dwell_sec": ae.features.get("dwell_sec", None) if ae else None,
+                "dwell_ratio": ae.features.get("dwell_ratio", None) if ae else None,
+                "dwell_z": ae.features.get("dwell_z", None) if ae else None,
+                "word_count": ae.features.get("word_count", None) if ae else None,
+                "words_per_sec": ae.features.get("words_per_sec", None) if ae else None,
                 "trend": ae.trend_label if ae else None,
                 "change_points": [cp.time_sec for cp in (ae.change_points if ae else [])],
                 "anomalies": ae.anomaly_flags if ae else [],

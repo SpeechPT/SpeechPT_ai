@@ -67,3 +67,67 @@ def test_generate_report_has_expected_sections():
     highlight2 = [x for x in payload["highlight_sections"] if x["slide_id"] == 2][0]
     assert "title_missing" in highlight2["issues"]
     assert any("핵심 제목/주제" in item["text"] for item in highlight2["feedback"])
+
+
+def test_generate_report_adds_dwell_feedback():
+    ce_results = [
+        SlideCoherenceResult(slide_id=1, coverage=0.9, missed_keypoints=[], evidence_spans=[]),
+        SlideCoherenceResult(slide_id=2, coverage=0.9, missed_keypoints=[], evidence_spans=[]),
+    ]
+    ae_results = [
+        SegmentAttitude(
+            slide_id=1,
+            start_sec=0.0,
+            end_sec=5.0,
+            features={
+                "avg_speech_rate": 3.0,
+                "silence_ratio": 0.0,
+                "pitch_mean": 200.0,
+                "energy_mean": -10.0,
+                "filler_count": 0,
+                "dwell_sec": 5.0,
+                "dwell_ratio": 0.1,
+                "dwell_z": -2.0,
+            },
+            change_points=[],
+            trend_label="stable",
+            anomaly_flags=[],
+            fillers=[],
+        ),
+        SegmentAttitude(
+            slide_id=2,
+            start_sec=5.0,
+            end_sec=50.0,
+            features={
+                "avg_speech_rate": 3.0,
+                "silence_ratio": 0.0,
+                "pitch_mean": 200.0,
+                "energy_mean": -10.0,
+                "filler_count": 0,
+                "dwell_sec": 45.0,
+                "dwell_ratio": 0.9,
+                "dwell_z": 2.5,
+            },
+            change_points=[],
+            trend_label="stable",
+            anomaly_flags=[],
+            fillers=[],
+        ),
+    ]
+
+    report = generate_report(
+        ce_results=ce_results,
+        ae_results=ae_results,
+        template_path=Path("speechpt/report/templates/feedback_ko.yaml"),
+        attitude_config={"scoring": {"dwell_short_z_threshold": -1.5, "dwell_long_z_threshold": 2.0}},
+    )
+
+    payload = report.to_dict()
+    slide1 = [x for x in payload["highlight_sections"] if x["slide_id"] == 1][0]
+    slide2 = [x for x in payload["highlight_sections"] if x["slide_id"] == 2][0]
+    assert "dwell_short" in slide1["issues"]
+    assert "dwell_long" in slide2["issues"]
+    assert any("발표 전체의 10.0%" in item["text"] for item in slide1["feedback"])
+    detail1 = [x for x in payload["per_slide_detail"] if x["slide_id"] == 1][0]
+    assert detail1["dwell_sec"] == 5.0
+    assert detail1["dwell_ratio"] == 0.1

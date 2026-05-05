@@ -77,6 +77,15 @@ issue_templates:
     severity: low
     text: "추임새 사용이 적절합니다. 자연스러운 흐름을 유지하세요."
 
+  - id: dwell_short
+    issue: dwell_short
+    severity: low
+    text: "슬라이드 {slide_id}는 발표 전체의 {dwell_ratio_pct}%를 차지했습니다. 다른 슬라이드 대비 짧으니 핵심 슬라이드라면 더 자세히 설명할 여지가 있습니다."
+  - id: dwell_long
+    issue: dwell_long
+    severity: low
+    text: "슬라이드 {slide_id}는 발표 전체의 {dwell_ratio_pct}%를 차지했습니다. 비중이 높은 만큼 핵심이 잘 전달되었는지 점검해보세요."
+
   - id: change_point_dense
     issue: change_point_dense
     severity: medium
