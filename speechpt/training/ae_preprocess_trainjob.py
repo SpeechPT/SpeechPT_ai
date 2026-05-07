@@ -291,8 +291,10 @@ def main():
     s3_rescue_on_empty = args.s3_rescue_on_empty.lower() == "true"
 
     test_ratio = 1.0 - args.train_ratio - args.valid_ratio
-    if args.train_ratio <= 0 or args.valid_ratio <= 0 or test_ratio < 0:
+    # 부동소수점 오차 허용 (예: 1.0 - 0.9 - 0.1 = -2.78e-17)
+    if args.train_ratio <= 0 or args.valid_ratio <= 0 or test_ratio < -1e-9:
         raise ValueError("train/valid ratios must be positive and sum to <= 1")
+    test_ratio = max(0.0, test_ratio)
 
     label_dir = Path(args.labels_dir)
     audio_dir = Path(args.audio_dir)
