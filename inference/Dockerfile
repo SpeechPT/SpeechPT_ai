@@ -8,7 +8,7 @@
 #     | docker login --username AWS --password-stdin \
 #     763104351884.dkr.ecr.ap-northeast-2.amazonaws.com)
 #   docker build -t speechpt-inference:v1 .
-FROM 763104351884.dkr.ecr.ap-northeast-2.amazonaws.com/pytorch-inference:2.1.0-gpu-py310-cu121-ubuntu20.04-sagemaker
+FROM 763104351884.dkr.ecr.ap-northeast-2.amazonaws.com/pytorch-inference:2.3.0-gpu-py311-cu121-ubuntu20.04-sagemaker
 
 # 환경변수 — 가드레일 ③: 메모리 단편화 억제
 ENV PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:128,expandable_segments:True"
