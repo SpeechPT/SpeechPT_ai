@@ -1,5 +1,5 @@
 sentence-transformers>=2.2.0
-transformers>=4.30.0
+transformers<=4.47.1
 torch>=2.0.0
 librosa>=0.10.0
 ruptures>=1.1.0
