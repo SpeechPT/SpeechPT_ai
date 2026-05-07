@@ -92,7 +92,7 @@ def create_pipeline(args) -> Pipeline:
         instance_count=1,
         instance_type=args.prep_instance_type,
         volume_size=50,
-        max_run=86400,
+        max_run=259200,
         output_path=f"s3://{BUCKET}/pipeline/ae/{ts}/prep-output/",
         entry_point="train.py",
         source_dir=SOURCE_DIR,
@@ -132,7 +132,7 @@ def create_pipeline(args) -> Pipeline:
         instance_count=1,
         instance_type=args.train_instance_type,
         input_mode="FastFile",
-        max_run=86400,
+        max_run=172800,
         output_path=f"s3://{BUCKET}/pipeline/ae/{ts}/models/",
         checkpoint_s3_uri=f"s3://{BUCKET}/pipeline/ae/{ts}/checkpoints/",
         hyperparameters={
@@ -300,13 +300,15 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument(
-        "--prep-instance-type", default="ml.c5.4xlarge", help="전처리 인스턴스 (Training Job)"
+        "--prep-instance-type", default="ml.g5.2xlarge",
+        help="전처리 인스턴스 (Training Job). 쿼터 제약으로 g5.2xlarge가 가용 최대 vCPU(8).",
     )
     parser.add_argument(
         "--train-instance-type", default="ml.g5.2xlarge", help="학습 인스턴스"
     )
     parser.add_argument(
-        "--eval-instance-type", default="ml.g5.xlarge", help="평가 인스턴스 (Processing Job, GPU)"
+        "--eval-instance-type", default="ml.t3.xlarge",
+        help="평가 인스턴스 (Processing Job). g5.xlarge processing 쿼터 부재로 t3.xlarge CPU 사용.",
     )
     parser.add_argument("--use-lora", action="store_true", help="LoRA 파인튜닝 활성화")
     parser.add_argument("--lora-r", type=int, default=16, help="LoRA rank (8, 16, 32)")
