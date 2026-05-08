@@ -116,3 +116,10 @@ stt:
   device: cpu
 report:
   template: speechpt/report/templates/feedback_ko.yaml
+  llm:
+    enabled: false
+    model: gpt-4.1-mini
+    api_key_file: key
+    timeout_sec: 60
+    max_output_tokens: 1200
+    max_slides: 12
