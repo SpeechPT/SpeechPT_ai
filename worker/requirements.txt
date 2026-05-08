@@ -5,3 +5,10 @@ psycopg2-binary>=2.9.0
 # Document parsing (Worker CPU)
 pymupdf>=1.23.0
 python-pptx>=0.6.21
+
+# Alignment (Worker CPU)
+kss
+kiwipiepy
+sentence-transformers
+scikit-learn
+

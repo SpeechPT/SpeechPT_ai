@@ -100,8 +100,8 @@ def model_fn(model_dir: str) -> Dict[str, Any]:
         raise RuntimeError(f"AE probe not found at {probe_path}")
 
     probe_state = torch.load(probe_path, map_location=device)
-    # 학습 시 in_dim 추출 (meta.pt 있으면 거기서)
-    meta_path = os.path.join(model_dir, "meta.pt")
+    # 학습 시 in_dim 추출 (meta.bin 있으면 거기서)
+    meta_path = os.path.join(model_dir, "meta.bin")
     in_dim = 1024
     if os.path.isfile(meta_path):
         meta = torch.load(meta_path, map_location="cpu")

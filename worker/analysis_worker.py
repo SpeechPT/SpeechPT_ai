@@ -28,7 +28,9 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from worker.sagemaker_client import invoke as sm_invoke
-
+from speechpt.coherence.keypoint_extractor import Keypoint
+from speechpt.coherence.auto_aligner import auto_align_slides
+from speechpt.coherence.transcript_aligner import align_transcript
 
 # ──────────────────────────────────────────────────────────────
 # 환경 변수
@@ -245,20 +247,49 @@ def run_real_analysis(payload: dict) -> dict:
         ce_result = {"coverage": 0.0, "covered_mask": []}
 
     # 4. AE (SageMaker) — 슬라이드별 segment
+    log("  invoking auto_aligner for accurate segments...")
+    slide_keypoints = []
+    for s in slides:
+        kps = []
+        if s.get("title"):
+            kps.append(Keypoint(text=s["title"], importance=1.0, source="title"))
+        for text_kp in s.get("keypoints", []):
+            if text_kp != s.get("title"):
+                kps.append(Keypoint(text=text_kp, importance=0.8, source="bullet"))
+        slide_keypoints.append(kps)
+        
+    try:
+        align_result = auto_align_slides(
+            slide_keypoints=slide_keypoints,
+            words=words,
+            model_name="jhgan/ko-sroberta-multitask"
+        )
+        boundaries = align_result.final_boundaries
+        transcript_segments = align_transcript(words, boundaries)
+        
+        segments = []
+        for i, (s, tseg) in enumerate(zip(slides, transcript_segments)):
+            segments.append({
+                "slide_id": s["slide_id"],
+                "start_sec": tseg.start_sec,
+                "end_sec": tseg.end_sec,
+            })
+    except Exception as e:
+        log(f"  auto_aligner failed: {e}. Falling back to uniform split.")
+        total_dur = max((w.get("end", 0) for w in words), default=0)
+        if total_dur <= 0 and slides:
+            total_dur = len(slides) * 30
+        seg_dur = total_dur / max(len(slides), 1)
+        segments = [
+            {
+                "slide_id": s["slide_id"],
+                "start_sec": i * seg_dur,
+                "end_sec": (i + 1) * seg_dur,
+            }
+            for i, s in enumerate(slides)
+        ]
+
     log("  invoking AE...")
-    # 단순 균등 분할 (Step 10: 자동 정렬 도입)
-    total_dur = max((w.get("end", 0) for w in words), default=0)
-    if total_dur <= 0 and slides:
-        total_dur = len(slides) * 30  # fallback
-    seg_dur = total_dur / max(len(slides), 1)
-    segments = [
-        {
-            "slide_id": s["slide_id"],
-            "start_sec": i * seg_dur,
-            "end_sec": (i + 1) * seg_dur,
-        }
-        for i, s in enumerate(slides)
-    ]
     ae_result = sm_invoke("ae", {
         "audio_s3": audio_uri,
         "segments": segments,
