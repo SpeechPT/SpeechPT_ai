@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import logging
 import time
@@ -18,11 +20,22 @@ from speechpt.coherence import auto_aligner, coherence_scorer, document_parser, 
 from speechpt.coherence.keypoint_extractor import Keypoint
 from speechpt.coherence.visual_captioner import build_visual_captions
 from speechpt.coherence.visual_ocr import enrich_slides_with_visual_ocr
+from speechpt.report.llm_writer import build_llm_feedback
 from speechpt.report.report_generator import SpeechReport, generate_report
 from speechpt.stt import transcribe_audio
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+
+def _call_suppressing_stdout(func, *args, **kwargs):
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        result = func(*args, **kwargs)
+    noise = buffer.getvalue().strip()
+    if noise:
+        logger.debug("Suppressed stdout from %s: %s", getattr(func, "__name__", repr(func)), noise)
+    return result
 
 
 class SpeechPTPipeline:
@@ -33,7 +46,8 @@ class SpeechPTPipeline:
         self.ce_cfg = self.cfg.get("coherence", {})
         self.ae_cfg = self.cfg.get("attitude", {})
         self.stt_cfg = self.cfg.get("stt", {})
-        self.report_tpl = Path(self.cfg.get("report", {}).get("template", "speechpt/report/templates/feedback_ko.yaml"))
+        self.report_cfg = self.cfg.get("report", {})
+        self.report_tpl = Path(self.report_cfg.get("template", "speechpt/report/templates/feedback_ko.yaml"))
 
     def apply_runtime_overrides(self, overrides: Dict | None = None) -> None:
         if not overrides:
@@ -129,7 +143,7 @@ class SpeechPTPipeline:
         words = whisper_result["words"]
 
         done = self._time("document_parsing")
-        slides = document_parser.parse_document(document_path)
+        slides = _call_suppressing_stdout(document_parser.parse_document, document_path)
         done()
 
         visual_cfg = self.ce_cfg.get("visual", {})
@@ -270,6 +284,14 @@ class SpeechPTPipeline:
             attitude_config=self.ae_cfg,
         )
         done()
+
+        llm_cfg = self.report_cfg.get("llm", {})
+        if llm_cfg.get("enabled", False):
+            done = self._time("llm_report_generation")
+            llm_feedback = build_llm_feedback(report.to_dict(), llm_cfg)
+            if llm_feedback is not None:
+                report.llm_feedback = llm_feedback
+            done()
 
         return report
 

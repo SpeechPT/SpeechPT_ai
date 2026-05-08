@@ -26,6 +26,7 @@ class SpeechReport:
     per_slide_detail: List[Dict]
     global_summary: Dict
     alignment: Dict = field(default_factory=dict)
+    llm_feedback: Dict = field(default_factory=dict)
 
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -244,6 +245,11 @@ def generate_report(
                 "dwell_z": ae.features.get("dwell_z", None) if ae else None,
                 "word_count": ae.features.get("word_count", None) if ae else None,
                 "words_per_sec": ae.features.get("words_per_sec", None) if ae else None,
+                "ae_probe": {
+                    key: value
+                    for key, value in (ae.features.items() if ae else [])
+                    if key.startswith("ae_probe_")
+                },
                 "trend": ae.trend_label if ae else None,
                 "change_points": [cp.time_sec for cp in (ae.change_points if ae else [])],
                 "anomalies": ae.anomaly_flags if ae else [],

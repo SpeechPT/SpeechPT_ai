@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Protocol, Sequence
 import fitz
 
 from speechpt.coherence.document_parser import SlideContent
+from speechpt.openai_utils import resolve_openai_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -414,7 +415,7 @@ def _write_cache(path: Path, result: VlmCaptionResult) -> None:
 
 
 def _build_client(config: Dict) -> VisionCaptionClient | None:
-    api_key = str(config.get("api_key") or os.environ.get("OPENAI_API_KEY") or "")
+    api_key = resolve_openai_api_key(config)
     if not api_key:
         logger.warning("VLM captioning enabled but OPENAI_API_KEY is not configured; falling back without captions.")
         return None
