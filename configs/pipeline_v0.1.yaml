@@ -123,6 +123,13 @@ attitude:
     model_name: "facebook/wav2vec2-base"
     use_probe: false
     chunk_duration_sec: 30
+  ae_probe:
+    enabled: false
+    model_dir: models/ae_probe_artifact
+    hf_model: "kresnik/wav2vec2-large-xlsr-korean"
+    sample_rate: 16000
+    device: auto
+    fail_open: true
 stt:
   enabled: false
   backend: faster-whisper

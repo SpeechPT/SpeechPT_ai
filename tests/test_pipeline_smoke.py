@@ -420,3 +420,47 @@ def test_pipeline_uses_vlm_captions_for_alignment_only(monkeypatch, tmp_path: Pa
     assert "vlm_visual" in captured_alignment_sources
     assert "vlm_role" in captured_alignment_sources
     assert not any(source.startswith("vlm_") for source in captured_scoring_sources)
+
+
+def test_pipeline_attaches_ae_probe_predictions(monkeypatch, tmp_path: Path):
+    cfg = {
+        "version": "0.3.0",
+        "coherence": {"model_name": "dummy", "threshold": 0.55},
+        "attitude": {"ae_probe": {"enabled": True, "model_dir": "models/ae_probe_artifact"}},
+        "stt": {"enabled": False},
+        "report": {"template": "speechpt/report/templates/feedback_ko.yaml"},
+    }
+    cfg_path = tmp_path / "pipeline.yaml"
+    cfg_path.write_text(json.dumps(cfg))
+
+    _patch_core(monkeypatch)
+
+    class DummyPrediction:
+        slide_id = 1
+
+        def to_feature_dict(self):
+            return {
+                "ae_probe_speech_rate": 1.23,
+                "ae_probe_silence_ratio": 0.12,
+                "ae_probe_overall_delivery": 0.78,
+            }
+
+    captured_segments = []
+
+    def fake_predict(audio_path, segments, config):
+        captured_segments.extend(segments)
+        return [DummyPrediction()]
+
+    monkeypatch.setattr("speechpt.pipeline.predict_ae_probe_segments", fake_predict)
+
+    pipeline = SpeechPTPipeline(str(cfg_path))
+    report = pipeline.analyze(
+        document_path="dummy.pdf",
+        audio_path="dummy.wav",
+        slide_timestamps=[0.0, 5.0],
+        whisper_result={"words": [{"word": "포인트", "start": 0.0, "end": 0.2}]},
+    )
+
+    assert captured_segments == [{"slide_id": 1, "start_sec": 0.0, "end_sec": 5.0}]
+    assert report.per_slide_detail[0]["ae_probe"]["ae_probe_speech_rate"] == 1.23
+    assert report.per_slide_detail[0]["ae_probe"]["ae_probe_overall_delivery"] == 0.78

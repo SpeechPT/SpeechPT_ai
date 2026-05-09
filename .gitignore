@@ -31,3 +31,6 @@ ML.md
 sagemaker.md
 
 cache/
+
+# local model artifacts
+models/

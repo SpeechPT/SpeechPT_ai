@@ -26,5 +26,6 @@ setup(
         "accelerate>=0.34.0",
         "easyocr>=1.7.1",
         "opencv-python-headless>=4.9.0.80",
+        "boto3>=1.34.0",
     ],
 )

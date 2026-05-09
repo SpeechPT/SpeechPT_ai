@@ -13,6 +13,7 @@ from typing import Dict, Sequence
 import yaml
 
 from speechpt.attitude.attitude_scorer import score_attitude
+from speechpt.attitude.ae_probe_runtime import predict_segments as predict_ae_probe_segments
 from speechpt.attitude.audio_feature_extractor import extract_audio_features
 from speechpt.attitude.change_point_detector import detect_change_points
 from speechpt.attitude.wav2vec2_embedder import Wav2Vec2Embedder
@@ -273,6 +274,24 @@ class SpeechPTPipeline:
             wav2vec_times=wav2vec_times,
         )
         done()
+
+        ae_probe_cfg = self.ae_cfg.get("ae_probe", {})
+        if ae_probe_cfg.get("enabled", False):
+            done = self._time("ae_probe_inference")
+            try:
+                ae_probe_predictions = predict_ae_probe_segments(audio_path, slide_segments, ae_probe_cfg)
+                predictions_by_slide = {item.slide_id: item for item in ae_probe_predictions}
+                for result in ae_results:
+                    prediction = predictions_by_slide.get(result.slide_id)
+                    if prediction is not None:
+                        result.features.update(prediction.to_feature_dict())
+            except Exception:
+                if ae_probe_cfg.get("fail_open", True):
+                    logger.exception("AE probe inference failed; continuing without ae_probe features")
+                else:
+                    raise
+            finally:
+                done()
 
         done = self._time("report_generation")
         report = generate_report(
