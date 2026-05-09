@@ -6,6 +6,8 @@ from speechpt.coherence.auto_aligner import (
     _absorb_pause_chunks,
     _anchor_cover_and_thanks,
     _decode_flexible_monotonic_path,
+    _decode_full_coverage_monotonic_path,
+    _decode_segmental_full_coverage_path,
     _refine_boundaries_with_title_cues,
     _resolve_cover_end,
     _smooth_low_confidence_runs,
@@ -78,6 +80,7 @@ def test_auto_align_slides_returns_slide_count_plus_one_boundaries(monkeypatch):
             "anchor_cover_slide": False,
             "min_dwell_units": 1,
             "start_skip_penalty": 1.0,
+            "robust_fallback_enabled": False,
         },
     )
     assert result.final_boundaries[0] == 0.0
@@ -220,6 +223,7 @@ def test_auto_align_slides_allows_trailing_slide_to_remain_empty(monkeypatch):
             "anchor_cover_slide": False,
             "min_dwell_units": 1,
             "start_skip_penalty": 1.0,
+            "robust_fallback_enabled": False,
         },
     )
 
@@ -227,6 +231,50 @@ def test_auto_align_slides_allows_trailing_slide_to_remain_empty(monkeypatch):
     assert assigned == sorted(assigned)
     assert assigned[-1] == 2
     assert result.final_boundaries == [0.0, 2.0, 4.2, 4.2]
+
+
+def test_auto_align_robust_fallback_recovers_unassigned_slide(monkeypatch):
+    monkeypatch.setattr("speechpt.coherence.auto_aligner._get_model", lambda _: DummyModel())
+    monkeypatch.setattr(
+        "speechpt.coherence.auto_aligner.kss.split_sentences",
+        lambda text: ["시장", "수익", "수익"],
+    )
+    slide_keypoints = [
+        [Keypoint(text="시장 규모", importance=1.0, source="title")],
+        [Keypoint(text="수익 구조", importance=1.0, source="title")],
+        [Keypoint(text="결론", importance=1.0, source="title")],
+    ]
+    words = [
+        {"word": "시장", "start": 0.0, "end": 0.2},
+        {"word": "수익", "start": 2.0, "end": 2.2},
+        {"word": "수익", "start": 4.0, "end": 4.2},
+    ]
+
+    result = auto_align_slides(
+        slide_keypoints=slide_keypoints,
+        words=words,
+        model_name="dummy",
+        config={
+            "pause_threshold_sec": 0.9,
+            "chunk_min_duration_sec": 0.1,
+            "chunk_min_words": 1,
+            "min_first_chunk_sec": 0.0,
+            "min_last_chunk_sec": 0.0,
+            "anchor_cover_slide": False,
+            "min_dwell_units": 1,
+            "start_skip_penalty": 1.0,
+            "robust_fallback_enabled": True,
+            "robust_fallback_on_duplicate": True,
+            "robust_fallback_on_unassigned": True,
+        },
+    )
+
+    assigned = [item["slide_id"] for item in result.unit_assignments]
+    assert assigned == [1, 2, 3]
+    assert result.final_boundaries == [0.0, 2.0, 4.0, 4.2]
+    assert result.strategy_used == "auto_robust_fallback"
+    assert "robust_fallback_applied" in result.warnings
+    assert "duplicate_boundaries_detected" not in result.warnings
 
 
 def test_auto_align_cover_anchor_keeps_opening_units_on_first_slide(monkeypatch):
@@ -302,6 +350,29 @@ def test_cover_anchor_falls_back_to_window_when_no_unit_ends_inside():
     assert cover_end == 8.0
 
 
+def test_cover_anchor_allows_small_end_overrun_without_first_unit_lock():
+    units = [
+        TimedUnit(unit_id=0, start_sec=0.0, end_sec=4.43, text="안녕하세요 자기소개", words=[]),
+        TimedUnit(unit_id=1, start_sec=4.43, end_sec=10.37, text="발표 제목 소개", words=[]),
+        TimedUnit(unit_id=2, start_sec=11.31, end_sec=20.07, text="프로젝트 개요 소개", words=[]),
+        TimedUnit(unit_id=3, start_sec=21.0, end_sec=30.0, text="다음 슬라이드", words=[]),
+    ]
+
+    cover_end = _resolve_cover_end(
+        units,
+        config={
+            "cover_min_window": 8.0,
+            "cover_max_window": 20.0,
+            "cover_ratio": 1.0,
+            "cover_end_overrun_sec": 2.0,
+            "cover_prefer_first_unit": False,
+            "cover_stop_on_next_title": False,
+        },
+    )
+
+    assert cover_end == 20.07
+
+
 def test_cover_anchor_stops_before_next_slide_title_cue():
     units = [
         TimedUnit(unit_id=0, start_sec=0.0, end_sec=10.0, text="발표를 시작하겠습니다", words=[]),
@@ -353,6 +424,59 @@ def test_dwell_decoder_prevents_single_unit_middle_slide():
         else:
             runs[-1][1] += 1
     assert all(length >= 2 for _, length in runs)
+
+
+def test_full_coverage_decoder_visits_every_slide_without_skips():
+    sim_matrix = np.array(
+        [
+            [0.6, 0.5, 0.5, 0.5],
+            [0.5, 0.6, 0.5, 0.5],
+            [0.5, 0.5, 0.6, 0.5],
+            [0.5, 0.5, 0.5, 0.6],
+        ],
+        dtype=float,
+    )
+
+    assignments = _decode_full_coverage_monotonic_path(
+        sim_matrix,
+        config={"robust_progress_penalty": 0.0},
+    )
+
+    assert assignments == [0, 1, 2, 3]
+
+
+def test_segmental_full_coverage_decoder_avoids_tiny_middle_segment():
+    units = [
+        TimedUnit(unit_id=0, start_sec=0.0, end_sec=10.0, text="s1", words=[]),
+        TimedUnit(unit_id=1, start_sec=10.0, end_sec=20.0, text="s1", words=[]),
+        TimedUnit(unit_id=2, start_sec=20.0, end_sec=21.0, text="weak", words=[]),
+        TimedUnit(unit_id=3, start_sec=21.0, end_sec=40.0, text="s2", words=[]),
+        TimedUnit(unit_id=4, start_sec=40.0, end_sec=60.0, text="s3", words=[]),
+    ]
+    sim_matrix = np.array(
+        [
+            [0.8, 0.2, 0.1],
+            [0.8, 0.2, 0.1],
+            [0.1, 0.9, 0.1],
+            [0.1, 0.8, 0.1],
+            [0.1, 0.2, 0.8],
+        ],
+        dtype=float,
+    )
+
+    assignments = _decode_segmental_full_coverage_path(
+        sim_matrix,
+        units,
+        config={
+            "robust_min_segment_sec": 8.0,
+            "robust_min_segment_ratio": 0.0,
+            "robust_short_segment_penalty_weight": 2.0,
+            "robust_duration_penalty_weight": 0.1,
+            "robust_segment_progress_penalty": 0.0,
+        },
+    )
+
+    assert assignments == [0, 0, 1, 1, 2]
 
 
 def test_thanks_anchor_ignores_early_closing_cue():

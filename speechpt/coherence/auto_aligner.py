@@ -73,7 +73,23 @@ DEFAULT_ALIGNMENT_CONFIG: Dict[str, Any] = {
     "absorb_margin_threshold": 0.05,
     "cover_prefer_first_unit": True,
     "cover_first_unit_min_sec": 3.0,
+    "cover_end_overrun_sec": 2.0,
     "cover_stop_on_next_title": True,
+    "robust_fallback_enabled": True,
+    "robust_fallback_confidence_threshold": 0.025,
+    "robust_fallback_on_duplicate": True,
+    "robust_fallback_on_unassigned": True,
+    "robust_fallback_min_units_per_slide": 1,
+    "robust_progress_penalty": 0.7,
+    "robust_stay_bonus": 0.02,
+    "robust_segmental_dp_enabled": True,
+    "robust_min_segment_sec": 12.0,
+    "robust_min_segment_ratio": 0.25,
+    "robust_duration_penalty_weight": 0.25,
+    "robust_short_segment_penalty_weight": 1.2,
+    "robust_segment_progress_penalty": 0.35,
+    "robust_boundary_pause_bonus": 0.08,
+    "low_confidence_warning_threshold": 0.03,
     "title_cue_boundary_refinement_enabled": True,
     "title_cue_refine_min_offset_sec": 1.0,
     "title_cue_search_max_units": 4,
@@ -837,6 +853,170 @@ def _decode_dwell_monotonic_path(
     return assignments
 
 
+def _decode_full_coverage_monotonic_path(sim_matrix: np.ndarray, config: Dict | None = None) -> List[int]:
+    """Decode a conservative path that visits every slide in order.
+
+    This is intentionally stricter than the primary DP and is used only as a
+    low-confidence recovery path. It forbids skips and duplicate/empty slides
+    when there are enough timed units to assign at least one unit per slide.
+    """
+    cfg = _alignment_config(config)
+    n_units, n_slides = sim_matrix.shape
+    if n_units == 0 or n_slides == 0:
+        return []
+    if n_slides == 1:
+        return [0] * n_units
+    if n_units < n_slides:
+        return _decode_flexible_monotonic_path(sim_matrix, config=cfg)
+
+    switch_penalty = float(cfg.get("switch_penalty", 0.08))
+    progress_penalty = float(cfg.get("robust_progress_penalty", cfg.get("progress_penalty", 0.35)))
+    lag_penalty_multiplier = float(cfg.get("lag_penalty_multiplier", 1.6))
+    stay_bonus = float(cfg.get("robust_stay_bonus", 0.0))
+
+    dp = np.full((n_units, n_slides), -np.inf, dtype=float)
+    back = np.full((n_units, n_slides), -1, dtype=int)
+    dp[0, 0] = _emission_score(
+        sim_matrix=sim_matrix,
+        unit_idx=0,
+        slide_idx=0,
+        progress_penalty=progress_penalty,
+        lag_penalty_multiplier=lag_penalty_multiplier,
+    )
+
+    for unit_idx in range(1, n_units):
+        for slide_idx in range(n_slides):
+            if slide_idx > unit_idx:
+                continue
+            if (n_units - 1 - unit_idx) < (n_slides - 1 - slide_idx):
+                continue
+
+            emission = _emission_score(
+                sim_matrix=sim_matrix,
+                unit_idx=unit_idx,
+                slide_idx=slide_idx,
+                progress_penalty=progress_penalty,
+                lag_penalty_multiplier=lag_penalty_multiplier,
+            )
+            stay_score = dp[unit_idx - 1, slide_idx] + stay_bonus
+            best_score = stay_score
+            best_prev = slide_idx
+            if slide_idx > 0:
+                advance_score = dp[unit_idx - 1, slide_idx - 1] - switch_penalty
+                if advance_score > best_score:
+                    best_score = advance_score
+                    best_prev = slide_idx - 1
+            if np.isneginf(best_score):
+                continue
+            dp[unit_idx, slide_idx] = best_score + emission
+            back[unit_idx, slide_idx] = best_prev
+
+    if np.isneginf(dp[-1, -1]):
+        return _decode_flexible_monotonic_path(sim_matrix, config=cfg)
+
+    slide_idx = n_slides - 1
+    assignments = [0] * n_units
+    for unit_idx in range(n_units - 1, -1, -1):
+        assignments[unit_idx] = slide_idx
+        if unit_idx == 0:
+            break
+        slide_idx = int(back[unit_idx, slide_idx])
+        if slide_idx < 0:
+            return _decode_flexible_monotonic_path(sim_matrix, config=cfg)
+    return assignments
+
+
+def _decode_segmental_full_coverage_path(
+    sim_matrix: np.ndarray,
+    units: Sequence[TimedUnit],
+    config: Dict | None = None,
+) -> List[int]:
+    """Segment-level fallback DP that assigns every slide a contiguous run."""
+    cfg = _alignment_config(config)
+    n_units, n_slides = sim_matrix.shape
+    if n_units == 0 or n_slides == 0:
+        return []
+    if n_slides == 1:
+        return [0] * n_units
+    if n_units < n_slides:
+        return _decode_full_coverage_monotonic_path(sim_matrix, config=cfg)
+
+    prefix = np.vstack([np.zeros((1, n_slides), dtype=float), np.cumsum(sim_matrix, axis=0)])
+    audio_start = float(units[0].start_sec)
+    audio_end = float(units[-1].end_sec)
+    total_duration = max(audio_end - audio_start, 0.1)
+    target_duration = total_duration / n_slides
+    min_duration = max(
+        float(cfg.get("robust_min_segment_sec", 12.0)),
+        target_duration * float(cfg.get("robust_min_segment_ratio", 0.25)),
+    )
+    duration_weight = float(cfg.get("robust_duration_penalty_weight", 0.25))
+    short_weight = float(cfg.get("robust_short_segment_penalty_weight", 1.2))
+    progress_weight = float(cfg.get("robust_segment_progress_penalty", 0.35))
+    pause_bonus = float(cfg.get("robust_boundary_pause_bonus", 0.08))
+    pause_threshold = float(cfg.get("pause_threshold_sec", 0.9))
+
+    def segment_score(start_idx: int, end_idx: int, slide_idx: int) -> float:
+        sim_sum = float(prefix[end_idx, slide_idx] - prefix[start_idx, slide_idx])
+        start_sec = float(units[start_idx].start_sec)
+        end_sec = float(units[end_idx - 1].end_sec)
+        duration = max(end_sec - start_sec, 0.1)
+        duration_penalty = duration_weight * abs(np.log(duration / max(target_duration, 0.1)))
+        if duration < min_duration:
+            duration_penalty += short_weight * (min_duration - duration) / max(min_duration, 0.1)
+        midpoint_progress = ((start_sec + end_sec) * 0.5 - audio_start) / total_duration
+        slide_progress = (slide_idx + 0.5) / n_slides
+        duration_penalty += progress_weight * abs(midpoint_progress - slide_progress)
+        boundary_bonus = 0.0
+        if start_idx > 0:
+            gap = float(units[start_idx].start_sec - units[start_idx - 1].end_sec)
+            if gap >= pause_threshold:
+                boundary_bonus += pause_bonus
+        return sim_sum - duration_penalty + boundary_bonus
+
+    dp = np.full((n_slides, n_units + 1), -np.inf, dtype=float)
+    back = np.full((n_slides, n_units + 1), -1, dtype=int)
+
+    for end_idx in range(1, n_units - n_slides + 2):
+        dp[0, end_idx] = segment_score(0, end_idx, 0)
+
+    for slide_idx in range(1, n_slides):
+        min_end = slide_idx + 1
+        max_end = n_units - (n_slides - 1 - slide_idx)
+        for end_idx in range(min_end, max_end + 1):
+            best_score = -np.inf
+            best_start = -1
+            for start_idx in range(slide_idx, end_idx):
+                prev_score = dp[slide_idx - 1, start_idx]
+                if np.isneginf(prev_score):
+                    continue
+                score = prev_score + segment_score(start_idx, end_idx, slide_idx)
+                if score > best_score:
+                    best_score = score
+                    best_start = start_idx
+            dp[slide_idx, end_idx] = best_score
+            back[slide_idx, end_idx] = best_start
+
+    if np.isneginf(dp[-1, -1]):
+        return _decode_full_coverage_monotonic_path(sim_matrix, config=cfg)
+
+    segments: List[tuple[int, int, int]] = []
+    end_idx = n_units
+    for slide_idx in range(n_slides - 1, -1, -1):
+        start_idx = int(back[slide_idx, end_idx]) if slide_idx > 0 else 0
+        if start_idx < 0:
+            return _decode_full_coverage_monotonic_path(sim_matrix, config=cfg)
+        segments.append((start_idx, end_idx, slide_idx))
+        end_idx = start_idx
+    segments.reverse()
+
+    assignments = [0] * n_units
+    for start_idx, end_idx, slide_idx in segments:
+        for unit_idx in range(start_idx, end_idx):
+            assignments[unit_idx] = slide_idx
+    return assignments
+
+
 def _slide_has_any_text(keypoints: Sequence[Keypoint], patterns: Sequence[str]) -> bool:
     text = " ".join(kp.text for kp in keypoints).lower()
     return any(pattern.lower() in text for pattern in patterns)
@@ -873,16 +1053,21 @@ def _resolve_cover_end(
             audio_end * _config_float(cfg, "cover_ratio", "cover_window_ratio"),
         ),
     )
+    overrun_sec = max(0.0, float(cfg.get("cover_end_overrun_sec", 0.0)))
+    cover_end_limit = cover_window + overrun_sec
     last_inside_end = None
     for unit in units:
-        if unit.end_sec <= cover_window + 1e-6:
+        # A unit that starts inside the cover window and spills just over the
+        # limit is usually still title/introduction speech. Large spills are
+        # excluded so the cover anchor cannot drift to a full next section.
+        if unit.end_sec <= cover_end_limit + 1e-6:
             last_inside_end = float(unit.end_sec)
             continue
         break
     if last_inside_end is None:
         return cover_window
 
-    inside_units = [unit for unit in units if unit.end_sec <= cover_window + 1e-6]
+    inside_units = [unit for unit in units if unit.end_sec <= cover_end_limit + 1e-6]
     if bool(cfg.get("cover_stop_on_next_title", True)) and slide_keypoints and len(slide_keypoints) >= 2:
         next_title_tokens = set(tokenize_nouns(_slide_title_text(slide_keypoints[1])))
         for idx, unit in enumerate(inside_units):
@@ -1298,6 +1483,135 @@ def _smooth_low_confidence_runs(
     return smoothed
 
 
+def _collect_alignment_details(
+    units: Sequence[TimedUnit],
+    assignments: Sequence[int],
+    confidence_sim_matrix: np.ndarray,
+    config: Dict | None = None,
+) -> tuple[List[Dict], List[Dict], float | None]:
+    cfg = _alignment_config(config)
+    min_similarity = float(cfg["confidence_min_similarity"])
+    min_margin = float(cfg["confidence_min_margin"])
+    low_confidence_segments: List[Dict] = []
+    unit_assignments: List[Dict] = []
+    confidence_values: List[float] = []
+
+    for unit_idx, unit in enumerate(units):
+        row = confidence_sim_matrix[unit_idx]
+        assigned = int(assignments[unit_idx])
+        best_score = float(row[assigned])
+        if len(row) > 1:
+            competitor = float(np.max(np.delete(row, assigned)))
+            margin = best_score - competitor
+        else:
+            margin = 1.0
+        confidence_values.append(max(0.0, min(1.0, margin)))
+        payload = {
+            "unit_id": unit.unit_id,
+            "slide_id": assigned + 1,
+            "start_sec": unit.start_sec,
+            "end_sec": unit.end_sec,
+            "text": unit.text,
+            "similarity": round(best_score, 4),
+            "margin": round(margin, 4),
+        }
+        unit_assignments.append(payload)
+        if best_score < min_similarity or margin < min_margin:
+            reason = []
+            if best_score < min_similarity:
+                reason.append("low_similarity")
+            if margin < min_margin:
+                reason.append("ambiguous_margin")
+            low_confidence_segments.append({**payload, "reason": ",".join(reason)})
+
+    confidence = float(np.mean(confidence_values)) if confidence_values else None
+    return unit_assignments, low_confidence_segments, confidence
+
+
+def _alignment_warnings(
+    assignments: Sequence[int],
+    boundaries: Sequence[float],
+    slide_count: int,
+    confidence: float | None,
+    config: Dict | None = None,
+) -> List[str]:
+    cfg = _alignment_config(config)
+    warnings: List[str] = []
+    covered_slides = {assignment + 1 for assignment in assignments}
+    if len(covered_slides) < slide_count:
+        warnings.append("not_all_slides_assigned")
+    if len(set(boundaries)) < len(boundaries):
+        warnings.append("duplicate_boundaries_detected")
+    low_threshold = float(cfg.get("low_confidence_warning_threshold", 0.0))
+    if confidence is not None and low_threshold > 0.0 and confidence < low_threshold:
+        warnings.append("low_alignment_confidence")
+    return warnings
+
+
+def _should_apply_robust_fallback(warnings: Sequence[str], confidence: float | None, config: Dict | None = None) -> bool:
+    cfg = _alignment_config(config)
+    if not bool(cfg.get("robust_fallback_enabled", True)):
+        return False
+    if bool(cfg.get("robust_fallback_on_duplicate", True)) and "duplicate_boundaries_detected" in warnings:
+        return True
+    if bool(cfg.get("robust_fallback_on_unassigned", True)) and "not_all_slides_assigned" in warnings:
+        return True
+    threshold = float(cfg.get("robust_fallback_confidence_threshold", 0.0))
+    return confidence is not None and threshold > 0.0 and confidence < threshold
+
+
+def _apply_robust_fallback(
+    assignments: Sequence[int],
+    units: Sequence[TimedUnit],
+    sim_matrix: np.ndarray,
+    slide_count: int,
+    anchors: EdgeAnchors,
+    config: Dict | None = None,
+) -> List[int] | None:
+    if not units or slide_count <= 0:
+        return None
+    cfg = _alignment_config(config)
+    min_units_per_slide = max(1, int(cfg.get("robust_fallback_min_units_per_slide", 1)))
+
+    last_slide_idx = slide_count - 1
+    first_dp_slide = 1 if anchors.cover_anchored and slide_count > 1 else 0
+    last_dp_exclusive = last_slide_idx if anchors.thanks_anchored and slide_count > 1 else slide_count
+    middle_slide_indices = list(range(first_dp_slide, last_dp_exclusive))
+    middle_unit_indices = [
+        idx
+        for idx, unit in enumerate(units)
+        if (not anchors.cover_anchored or unit.start_sec >= anchors.cover_end_sec)
+        and (not anchors.thanks_anchored or unit.start_sec < anchors.thanks_start_sec)
+    ]
+    if not middle_slide_indices:
+        return None
+    if len(middle_unit_indices) < len(middle_slide_indices) * min_units_per_slide:
+        return None
+
+    robust = list(assignments)
+    for idx, unit in enumerate(units):
+        if anchors.cover_anchored and unit.end_sec <= anchors.cover_end_sec + 1e-6:
+            robust[idx] = 0
+        elif anchors.thanks_anchored and unit.start_sec >= anchors.thanks_start_sec:
+            robust[idx] = last_slide_idx
+
+    sub_sim = sim_matrix[np.ix_(middle_unit_indices, middle_slide_indices)]
+    sub_units = [units[idx] for idx in middle_unit_indices]
+    if bool(cfg.get("robust_segmental_dp_enabled", True)):
+        sub_assignments = _decode_segmental_full_coverage_path(sub_sim, sub_units, config=cfg)
+    else:
+        sub_assignments = _decode_full_coverage_monotonic_path(sub_sim, config=cfg)
+    if len(set(sub_assignments)) < len(middle_slide_indices):
+        return None
+    for local_unit_idx, local_slide_idx in zip(middle_unit_indices, sub_assignments):
+        robust[local_unit_idx] = middle_slide_indices[int(local_slide_idx)]
+
+    for idx in range(1, len(robust)):
+        robust[idx] = max(robust[idx], robust[idx - 1])
+        robust[idx] = min(robust[idx], slide_count - 1)
+    return robust
+
+
 def auto_align_slides(
     slide_keypoints: Sequence[Sequence[Keypoint]],
     words: Sequence[Dict],
@@ -1423,49 +1737,51 @@ def auto_align_slides(
         config=cfg,
     )
 
-    covered_slides = {assignment + 1 for assignment in assignments}
-    if len(covered_slides) < slide_count:
-        warnings.append("not_all_slides_assigned")
-    if len(set(boundaries)) < len(boundaries):
-        warnings.append("duplicate_boundaries_detected")
-
-    min_similarity = float(cfg["confidence_min_similarity"])
-    min_margin = float(cfg["confidence_min_margin"])
-    low_confidence_segments: List[Dict] = []
-    unit_assignments: List[Dict] = []
-    confidence_values: List[float] = []
-
-    for unit_idx, unit in enumerate(units):
-        row = confidence_sim_matrix[unit_idx]
-        best_score = float(row[assignments[unit_idx]])
-        if len(row) > 1:
-            competitor = float(np.max(np.delete(row, assignments[unit_idx])))
-            margin = best_score - competitor
+    unit_assignments, low_confidence_segments, confidence = _collect_alignment_details(
+        units,
+        assignments,
+        confidence_sim_matrix,
+        config=cfg,
+    )
+    warnings = _alignment_warnings(assignments, boundaries, slide_count, confidence, config=cfg)
+    if _should_apply_robust_fallback(warnings, confidence, config=cfg):
+        robust_assignments = _apply_robust_fallback(
+            assignments,
+            units,
+            sim_matrix,
+            slide_count,
+            anchors,
+            config=cfg,
+        )
+        if robust_assignments is not None and robust_assignments != assignments:
+            assignments = robust_assignments
+            boundaries = _build_boundaries(units, assignments, slide_count)
+            boundaries = _refine_boundaries_with_title_cues(
+                boundaries,
+                units,
+                assignments,
+                boundary_keypoints,
+                config=cfg,
+            )
+            unit_assignments, low_confidence_segments, confidence = _collect_alignment_details(
+                units,
+                assignments,
+                confidence_sim_matrix,
+                config=cfg,
+            )
+            warnings = ["robust_fallback_applied"] + _alignment_warnings(
+                assignments,
+                boundaries,
+                slide_count,
+                confidence,
+                config=cfg,
+            )
         else:
-            margin = 1.0
-        confidence_values.append(max(0.0, min(1.0, margin)))
-        payload = {
-            "unit_id": unit.unit_id,
-            "slide_id": assignments[unit_idx] + 1,
-            "start_sec": unit.start_sec,
-            "end_sec": unit.end_sec,
-            "text": unit.text,
-            "similarity": round(best_score, 4),
-            "margin": round(margin, 4),
-        }
-        unit_assignments.append(payload)
-        if best_score < min_similarity or margin < min_margin:
-            reason = []
-            if best_score < min_similarity:
-                reason.append("low_similarity")
-            if margin < min_margin:
-                reason.append("ambiguous_margin")
-            low_confidence_segments.append({**payload, "reason": ",".join(reason)})
+            warnings = ["robust_fallback_unavailable"] + warnings
 
-    confidence = float(np.mean(confidence_values)) if confidence_values else None
     return AlignmentResult(
         mode="auto",
-        strategy_used="auto",
+        strategy_used="auto_robust_fallback" if "robust_fallback_applied" in warnings else "auto",
         final_boundaries=boundaries,
         proposed_boundaries=boundaries,
         confidence=confidence,
@@ -1525,7 +1841,6 @@ def resolve_alignment(
 
     if requested_mode == "auto":
         auto_result.mode = "auto"
-        auto_result.strategy_used = "auto"
         auto_result.provided_boundaries = manual_boundaries
         auto_result.warnings = manual_warnings + auto_result.warnings
         return auto_result
@@ -1550,5 +1865,6 @@ def resolve_alignment(
         )
 
     auto_result.mode = "hybrid"
-    auto_result.strategy_used = "auto_without_manual_override"
+    if auto_result.strategy_used == "auto":
+        auto_result.strategy_used = "auto_without_manual_override"
     return auto_result

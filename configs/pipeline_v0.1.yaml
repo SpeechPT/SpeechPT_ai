@@ -26,9 +26,25 @@ coherence:
     cover_min_window: 8.0
     cover_max_window: 20.0
     cover_ratio: 0.15
-    cover_prefer_first_unit: true
+    cover_prefer_first_unit: false
     cover_first_unit_min_sec: 3.0
-    cover_stop_on_next_title: true
+    cover_end_overrun_sec: 2.0
+    cover_stop_on_next_title: false
+    robust_fallback_enabled: true
+    robust_fallback_confidence_threshold: 0.025
+    robust_fallback_on_duplicate: true
+    robust_fallback_on_unassigned: true
+    robust_fallback_min_units_per_slide: 1
+    robust_progress_penalty: 0.7
+    robust_stay_bonus: 0.02
+    robust_segmental_dp_enabled: true
+    robust_min_segment_sec: 12.0
+    robust_min_segment_ratio: 0.25
+    robust_duration_penalty_weight: 0.25
+    robust_short_segment_penalty_weight: 1.2
+    robust_segment_progress_penalty: 0.35
+    robust_boundary_pause_bonus: 0.08
+    low_confidence_warning_threshold: 0.03
     anchor_thanks_slide: true
     thanks_search_start_ratio: 0.85
     closing_cues: ["감사합니다", "들어주셔", "이상입니", "마치겠습니", "감사드립니"]
