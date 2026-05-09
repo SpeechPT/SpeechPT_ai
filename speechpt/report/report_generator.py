@@ -26,6 +26,7 @@ class SpeechReport:
     per_slide_detail: List[Dict]
     global_summary: Dict
     alignment: Dict = field(default_factory=dict)
+    transcript_segments: List[Dict] = field(default_factory=list)
     llm_feedback: Dict = field(default_factory=dict)
 
     def to_dict(self) -> Dict:
@@ -187,6 +188,7 @@ def generate_report(
     version: str = "0.3.0",
     alignment: Dict | None = None,
     attitude_config: Dict | None = None,
+    transcript_segments: Sequence[Dict] | None = None,
 ) -> SpeechReport:
     templates = _load_templates(Path(template_path))
     issue_templates = templates.get("issue_templates", [])
@@ -288,6 +290,7 @@ def generate_report(
         per_slide_detail=per_slide,
         global_summary=global_summary,
         alignment=alignment or {},
+        transcript_segments=list(transcript_segments or []),
     )
 
 

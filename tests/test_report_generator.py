@@ -53,12 +53,24 @@ def test_generate_report_has_expected_sections():
         ae_results=ae_results,
         template_path=Path("speechpt/report/templates/feedback_ko.yaml"),
         version="0.3.0",
+        transcript_segments=[
+            {
+                "slide_id": 1,
+                "start_sec": 0.0,
+                "end_sec": 30.0,
+                "text": "발표 도입입니다.",
+                "words": [{"word": "발표", "start": 0.0, "end": 0.2}],
+                "warning_flags": [],
+            }
+        ],
     )
 
     payload = report.to_dict()
     assert payload["version"] == "0.3.0"
     assert "overall_scores" in payload
     assert "highlight_sections" in payload
+    assert payload["transcript_segments"][0]["slide_id"] == 1
+    assert payload["transcript_segments"][0]["words"][0]["word"] == "발표"
     assert len(payload["per_slide_detail"]) == 2
     slide2 = [x for x in payload["per_slide_detail"] if x["slide_id"] == 2][0]
     assert "매출 차트" in " ".join(slide2["visual_missed"])

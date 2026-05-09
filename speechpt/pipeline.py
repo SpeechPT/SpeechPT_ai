@@ -29,6 +29,20 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
+def _serialize_transcript_segments(segments: Sequence[transcript_aligner.TranscriptSegment]) -> list[Dict]:
+    return [
+        {
+            "slide_id": segment.slide_id,
+            "start_sec": segment.start_sec,
+            "end_sec": segment.end_sec,
+            "text": segment.text,
+            "words": segment.words,
+            "warning_flags": segment.warning_flags,
+        }
+        for segment in segments
+    ]
+
+
 def _call_suppressing_stdout(func, *args, **kwargs):
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):
@@ -301,6 +315,7 @@ class SpeechPTPipeline:
             version=self.cfg.get("version", "0.3.0"),
             alignment=alignment.to_dict(),
             attitude_config=self.ae_cfg,
+            transcript_segments=_serialize_transcript_segments(segments),
         )
         done()
 
