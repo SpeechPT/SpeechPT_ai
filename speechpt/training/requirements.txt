@@ -1,3 +1,7 @@
 transformers==4.41.2
 librosa>=0.10.0
 soundfile>=0.12.1
+# peft + accelerate 버전 묶음: peft 0.11.1은 accelerate 0.30+의
+# clear_device_cache API를 요구 (transformers 4.41.2와 호환)
+peft==0.11.1
+accelerate>=0.30.1

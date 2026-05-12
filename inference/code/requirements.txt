@@ -7,3 +7,13 @@ librosa>=0.10.0
 soundfile>=0.12.0
 numpy>=1.24.0,<2.0
 boto3>=1.34.0
+
+# task=pipeline (SpeechPTPipeline.analyze 전체 실행)에 필요한 의존성
+pyyaml>=6.0
+pymupdf>=1.23.0
+python-pptx>=0.6.21
+faster-whisper>=1.0.0
+kss
+kiwipiepy
+scikit-learn
+ruptures>=1.1.9

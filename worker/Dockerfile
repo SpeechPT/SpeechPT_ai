@@ -10,7 +10,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY worker/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY speechpt/ ./speechpt/
 COPY worker/ ./worker/
 
 ENV PYTHONUNBUFFERED=1

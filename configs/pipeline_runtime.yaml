@@ -1,0 +1,134 @@
+# SageMaker Endpoint 런타임용 pipeline config
+# - STT는 컨테이너 안 faster-whisper(CPU)로 처리 (GPU는 wav2vec2 전용으로 남김)
+# - report.llm.enabled=true 로 OpenAI 최종 피드백 생성
+# - VLM/visual OCR은 비용/지연 이유로 OFF
+#
+# OpenAI API key는 컨테이너 환경변수 OPENAI_API_KEY 로 주입 (deploy_unified_endpoint.py 참조)
+
+version: 0.3.0
+coherence:
+  model_name: jhgan/ko-sroberta-multitask
+  threshold: 0.55
+  chunk_max_len: 120
+  alignment:
+    mode: hybrid
+    pause_threshold_sec: 0.9
+    chunk_min_duration_sec: 2.0
+    chunk_max_duration_sec: 8.0
+    chunk_min_words: 3
+    chunk_max_words: 36
+    min_first_chunk_sec: 2.0
+    min_last_chunk_sec: 2.0
+    switch_penalty: 0.08
+    skip_penalty: 0.15
+    extra_skip_penalty: 0.4
+    start_skip_penalty: 2.0
+    allow_skip: true
+    max_slide_jump: 2
+    min_dwell_units: 2
+    stay_bonus: 0.05
+    progress_penalty: 0.35
+    lag_penalty_multiplier: 1.6
+    anchor_cover_slide: true
+    cover_min_window: 8.0
+    cover_max_window: 20.0
+    cover_ratio: 0.15
+    cover_prefer_first_unit: false
+    cover_first_unit_min_sec: 3.0
+    cover_end_overrun_sec: 2.0
+    cover_stop_on_next_title: false
+    robust_fallback_enabled: true
+    robust_fallback_confidence_threshold: 0.025
+    robust_fallback_on_duplicate: true
+    robust_fallback_on_unassigned: true
+    robust_fallback_min_units_per_slide: 1
+    robust_progress_penalty: 0.7
+    robust_stay_bonus: 0.02
+    robust_segmental_dp_enabled: true
+    robust_min_segment_sec: 12.0
+    robust_min_segment_ratio: 0.25
+    robust_duration_penalty_weight: 0.25
+    robust_short_segment_penalty_weight: 1.2
+    robust_segment_progress_penalty: 0.35
+    robust_boundary_pause_bonus: 0.08
+    low_confidence_warning_threshold: 0.03
+    anchor_thanks_slide: true
+    thanks_search_start_ratio: 0.85
+    closing_cues: ["감사합니다", "들어주셔", "이상입니", "마치겠습니", "감사드립니"]
+    confidence_min_similarity: 0.35
+    confidence_min_margin: 0.10
+    use_multi_signal_similarity: true
+    short_title_max_words: 2
+    short_title_max_chars: 6
+    short_title_weight: 0.55
+    default_title_weight: 0.35
+    semantic_weight: 0.7
+    lexical_weight: 0.2
+    title_hit_weight: 0.1
+    body_semantic_weight: 0.5
+    keyword_semantic_weight: 0.3
+    visual_semantic_weight: 0.2
+    smoothing_enabled: true
+    smoothing_margin_threshold: 0.10
+    smoothing_max_units: 2
+    smoothing_preserve_assigned_slides: true
+    absorb_pause_chunks_enabled: true
+    absorb_min_chunk_sec: 3.0
+    absorb_edge_max_sec: 9.0
+    absorb_max_chunk_utts: 2
+    absorb_margin_threshold: 0.05
+    title_cue_boundary_refinement_enabled: true
+    title_cue_refine_min_offset_sec: 1.0
+    title_cue_search_max_units: 4
+    title_cue_allow_first_token_fallback: true
+  vlm_caption:
+    enabled: false
+  visual:
+    enabled: false
+attitude:
+  audio:
+    sample_rate: 16000
+    hop_length: 512
+  pitch:
+    fmin: 50
+    fmax: 500
+  silence:
+    threshold_db: -40
+    min_duration_sec: 0.5
+  change_point:
+    algorithm: "pelt"
+    model: "rbf"
+    penalty: 3.0
+    merge_tolerance_sec: 2.0
+  scoring:
+    anomaly_z_threshold: 1.5
+    filler_patterns: ["음", "어", "그", "아", "그러니까", "뭐"]
+    trend_slope_eps: 0.001
+    dwell_short_z_threshold: -1.5
+    dwell_long_z_threshold: 2.0
+  wav2vec2:
+    model_name: "facebook/wav2vec2-base"
+    use_probe: false
+    chunk_duration_sec: 30
+  ae_probe:
+    enabled: true
+    model_dir: /opt/ml/model
+    hf_model: "kresnik/wav2vec2-large-xlsr-korean"
+    sample_rate: 16000
+    device: auto
+    fail_open: true
+stt:
+  enabled: true
+  backend: faster-whisper
+  model_name: small
+  language: ko
+  compute_type: int8
+  device: cpu
+report:
+  template: /opt/ml/code/speechpt/report/templates/feedback_ko.yaml
+  llm:
+    enabled: true
+    model: gpt-4.1-mini
+    timeout_sec: 60
+    max_output_tokens: 1200
+    max_slides: 12

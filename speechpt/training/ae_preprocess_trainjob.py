@@ -6,8 +6,11 @@ import io
 import json
 import os
 import random
+import threading
 import wave
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
 import boto3
@@ -23,14 +26,54 @@ from prepare_ae_from_raws import (
 )
 
 
-_S3_CONFIG = boto3.session.Session().client(
-    "s3",
-    config=boto3.session.Config(
-        connect_timeout=10,
-        read_timeout=30,
-        retries={"max_attempts": 2},
-    ),
-)
+def _make_s3_client():
+    """timeout/retry가 설정된 boto3 S3 클라이언트 생성.
+
+    ProcessPoolExecutor 워커마다 fork-safe 하게 새로 만들기 위해 함수로 분리.
+    """
+    return boto3.session.Session().client(
+        "s3",
+        config=boto3.session.Config(
+            connect_timeout=10,
+            read_timeout=30,
+            retries={"max_attempts": 2},
+        ),
+    )
+
+
+# 클라이언트 캐싱 전략:
+# - 메인 프로세스: 모듈 로드 시 생성 안 함 (lazy). spawn 워커가 모듈 임포트할 때
+#   IMDS 자격 증명 호출 폭주를 막기 위함.
+# - ProcessPool 워커: _init_worker에서 _WORKER_S3_CLIENT 생성 (process-local).
+# - ThreadPool 워커: threading.local()로 thread-local 클라이언트 (fork 후 손상된
+#   글로벌 클라이언트 공유로 인한 hang 방지).
+_S3_CONFIG = None  # 메인 스레드 호출용 (lazy)
+_WORKER_S3_CLIENT = None  # ProcessPool 자식 프로세스용
+_thread_local = threading.local()  # ThreadPool 스레드용
+
+
+def _init_worker():
+    """ProcessPoolExecutor initializer — 자식 프로세스 진입 시 1회 호출."""
+    global _WORKER_S3_CLIENT
+    _WORKER_S3_CLIENT = _make_s3_client()
+
+
+def _get_s3_client():
+    """컨텍스트별 fork/thread-safe S3 클라이언트 반환."""
+    # ProcessPool 워커 — process-local
+    if _WORKER_S3_CLIENT is not None:
+        return _WORKER_S3_CLIENT
+    # ThreadPool 워커 또는 메인 — thread-local 우선
+    cli = getattr(_thread_local, "client", None)
+    if cli is None:
+        cli = _make_s3_client()
+        _thread_local.client = cli
+    return cli
+
+
+# 오디오 분석 구간 (초). 30s → 15s 단축 시 librosa.pyin이 약 50% 빨라짐.
+# 발화 평가 라벨링 컨텍스트에서 15s도 silence_ratio/F0std/energy slope 통계량으로 충분.
+_AUDIO_ANALYSIS_DURATION_SEC = float(os.environ.get("AE_PREP_AUDIO_DURATION", "15.0"))
 
 
 def derive_audio_targets_from_s3(bucket: str, key: str) -> dict | None:
@@ -41,10 +84,10 @@ def derive_audio_targets_from_s3(bucket: str, key: str) -> dict | None:
     실패 시 None 반환 (row 자체를 제외하도록 호출부에서 처리).
     """
     try:
-        obj = _S3_CONFIG.get_object(Bucket=bucket, Key=key)
+        obj = _get_s3_client().get_object(Bucket=bucket, Key=key)
         audio_bytes = io.BytesIO(obj["Body"].read())
-        # 억양 변화 판정에는 30초로 충분 — 전체 로드 대비 3~5배 빠름
-        y, sr = librosa.load(audio_bytes, sr=16000, mono=True, duration=30.0)
+        # 분석 구간 (기본 15s) — 발화 평가 통계량(silence_ratio/F0 std/energy slope)에 충분.
+        y, sr = librosa.load(audio_bytes, sr=16000, mono=True, duration=_AUDIO_ANALYSIS_DURATION_SEC)
     except Exception:
         return None
 
@@ -85,6 +128,37 @@ def derive_audio_targets_from_s3(bucket: str, key: str) -> dict | None:
         "silence_ratio": float(max(0.0, min(1.0, silence_ratio))),
         "energy_drop": int(energy_drop),
         "pitch_shift": int(pitch_shift),
+    }
+
+
+def _process_audio_candidate(arg_tuple) -> dict | None:
+    """모듈 레벨 — ProcessPoolExecutor가 pickle해서 워커로 보낼 수 있도록 클로저 외부화.
+
+    arg_tuple: (cand, audio_bucket, audio_prefix, use_audio_features)
+    """
+    cand, audio_bucket, audio_prefix, use_audio_features = arg_tuple
+    wav_name = cand["wav_name"]
+    speech_rate = cand["speech_rate"]
+    if use_audio_features and audio_bucket:
+        audio_key = audio_prefix + wav_name
+        audio_targets = derive_audio_targets_from_s3(audio_bucket, audio_key)
+        if audio_targets is None:
+            return None
+    else:
+        audio_targets = fallback_audio_targets(speech_rate=speech_rate)
+    overall_delivery = compute_overall_delivery(
+        speech_rate=speech_rate,
+        silence_ratio=audio_targets["silence_ratio"],
+        energy_drop=audio_targets["energy_drop"],
+        pitch_shift=audio_targets["pitch_shift"],
+    )
+    return {
+        "audio_path": f"audio/{wav_name}",
+        "speech_rate": speech_rate,
+        "silence_ratio": float(audio_targets["silence_ratio"]),
+        "energy_drop": int(audio_targets["energy_drop"]),
+        "pitch_shift": int(audio_targets["pitch_shift"]),
+        "overall_delivery": float(overall_delivery),
     }
 
 
@@ -145,6 +219,11 @@ def build_rows_from_s3(
     audio_s3_uri: str = "",
     use_audio_features: bool = False,
     num_workers: int = 16,
+    start_index: int = 0,
+    end_index: int = 0,
+    checkpoint_interval: int = 0,
+    checkpoint_s3_uri: str = "",
+    checkpoint_name: str = "rows_partial",
 ) -> tuple[list[dict], dict]:
     label_bucket, label_prefix = parse_s3_uri(labels_s3_uri.rstrip("/") + "/")
     s3 = boto3.client("s3")
@@ -209,51 +288,213 @@ def build_rows_from_s3(
             continue
         break
 
-    print(json.dumps({"stage": "label_scan_done", "candidates": len(candidates)}, ensure_ascii=False))
+    total_scanned = len(candidates)
+    print(json.dumps({"stage": "label_scan_done", "candidates": total_scanned}, ensure_ascii=False))
 
-    # Phase 2: 오디오 분석 병렬 처리 (ThreadPoolExecutor)
-    audio_signal_fail = 0
+    # Phase 1.5: 인덱스 범위 슬라이싱 (병렬 처리 / 부분 재시도)
+    sliced_start = max(0, start_index)
+    sliced_end = end_index if end_index > 0 else len(candidates)
+    sliced_end = min(sliced_end, len(candidates))
+    if sliced_start > 0 or sliced_end < len(candidates):
+        candidates = candidates[sliced_start:sliced_end]
+        print(json.dumps({
+            "stage": "candidates_sliced",
+            "start_index": sliced_start,
+            "end_index": sliced_end,
+            "sliced_count": len(candidates),
+            "total_scanned": total_scanned,
+        }, ensure_ascii=False))
+
+    # Phase 1.6: S3 체크포인트 resume — 이미 처리된 행 로드 후 남은 인덱스만 처리
     rows: list[dict] = []
+    resume_skip = 0
+    audio_signal_fail = 0
+    checkpoint_key = None
+    checkpoint_bucket = None
+    if checkpoint_interval > 0 and checkpoint_s3_uri:
+        checkpoint_bucket, ckpt_prefix = parse_s3_uri(checkpoint_s3_uri.rstrip("/") + "/")
+        checkpoint_key = f"{ckpt_prefix}{checkpoint_name}.jsonl"
+        try:
+            obj = boto3.client("s3").get_object(Bucket=checkpoint_bucket, Key=checkpoint_key)
+            body = obj["Body"].read().decode("utf-8")
+            for line in body.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                rows.append(json.loads(line))
+            resume_skip = len(rows)
+            print(json.dumps({
+                "stage": "checkpoint_resumed",
+                "checkpoint_s3": f"s3://{checkpoint_bucket}/{checkpoint_key}",
+                "rows_loaded": resume_skip,
+            }, ensure_ascii=False))
+        except boto3.client("s3").exceptions.NoSuchKey:
+            print(json.dumps({
+                "stage": "checkpoint_none",
+                "checkpoint_s3": f"s3://{checkpoint_bucket}/{checkpoint_key}",
+            }, ensure_ascii=False))
+        except Exception as ckpt_exc:
+            print(json.dumps({
+                "warning": "checkpoint_load_failed",
+                "msg": str(ckpt_exc)[:200],
+            }, ensure_ascii=False))
+        # resume_skip 만큼은 이미 처리됨 — 남은 candidates만 처리
+        if resume_skip > 0:
+            candidates = candidates[resume_skip:]
 
-    def _process(cand: dict) -> dict | None:
-        wav_name = cand["wav_name"]
-        speech_rate = cand["speech_rate"]
-        if use_audio_features and audio_bucket:
-            audio_key = audio_prefix + wav_name
-            audio_targets = derive_audio_targets_from_s3(audio_bucket, audio_key)
-            if audio_targets is None:
-                return None
-        else:
-            audio_targets = fallback_audio_targets(speech_rate=speech_rate)
-        overall_delivery = compute_overall_delivery(
-            speech_rate=speech_rate,
-            silence_ratio=audio_targets["silence_ratio"],
-            energy_drop=audio_targets["energy_drop"],
-            pitch_shift=audio_targets["pitch_shift"],
-        )
-        return {
-            "audio_path": f"audio/{wav_name}",
-            "speech_rate": speech_rate,
-            "silence_ratio": float(audio_targets["silence_ratio"]),
-            "energy_drop": int(audio_targets["energy_drop"]),
-            "pitch_shift": int(audio_targets["pitch_shift"]),
-            "overall_delivery": float(overall_delivery),
-        }
+    # Phase 2: 오디오 분석 병렬 처리
+    use_processes = os.environ.get("AE_PREP_USE_PROCESSES", "true").lower() == "true"
+    if use_processes:
+        # ProcessPool: vCPU 수에 맞춰 워커 수 캡 (16개를 4코어에 띄우면 컨텍스트 스위칭 손실)
+        cpu_count = os.cpu_count() or 8
+        worker_count = min(num_workers, cpu_count)
+    else:
+        worker_count = num_workers
 
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        futures = {executor.submit(_process, c): c for c in candidates}
-        done = 0
-        for future in as_completed(futures):
-            result = future.result()
-            if result is None:
-                audio_signal_fail += 1
-            else:
-                rows.append(result)
-            done += 1
-            if done % 500 == 0:
-                print(json.dumps({"stage": "audio_analysis_progress",
-                                  "done": done, "total": len(candidates),
-                                  "rows_ok": len(rows)}, ensure_ascii=False))
+    print(json.dumps({
+        "stage": "audio_analysis_start",
+        "executor": "ProcessPool" if use_processes else "ThreadPool",
+        "workers": worker_count,
+        "audio_duration_sec": _AUDIO_ANALYSIS_DURATION_SEC,
+        "candidates": len(candidates),
+        "resume_skip": resume_skip,
+        "checkpoint_interval": checkpoint_interval,
+        "checkpoint_s3": f"s3://{checkpoint_bucket}/{checkpoint_key}" if checkpoint_key else None,
+        "mp_start_method": "forkserver" if use_processes else "n/a",
+    }, ensure_ascii=False))
+
+    task_args_all = [(c, audio_bucket, audio_prefix, use_audio_features) for c in candidates]
+    n_total = len(task_args_all)
+
+    def _save_checkpoint(rows_so_far: list[dict]) -> None:
+        """현재까지 처리된 rows 전체를 체크포인트로 S3에 덮어쓰기.
+
+        클라이언트 충돌 시 다음 시작 때 이 파일에서 이어서 처리할 수 있다.
+        """
+        if not checkpoint_key or not checkpoint_bucket:
+            return
+        try:
+            body = "\n".join(json.dumps(r, ensure_ascii=False) for r in rows_so_far) + "\n"
+            boto3.client("s3").put_object(
+                Bucket=checkpoint_bucket,
+                Key=checkpoint_key,
+                Body=body.encode("utf-8"),
+            )
+            print(json.dumps({
+                "stage": "checkpoint_saved",
+                "rows": len(rows_so_far),
+                "key": checkpoint_key,
+            }, ensure_ascii=False))
+        except Exception as exc:
+            print(json.dumps({
+                "warning": "checkpoint_save_failed",
+                "msg": str(exc)[:200],
+            }, ensure_ascii=False))
+
+    def _run_threadpool(args_list: list, start_offset: int = 0) -> tuple[int, list]:
+        """단일 ThreadPool로 args_list 처리. start_offset은 진행 로그 누적용."""
+        local_rows: list[dict] = []
+        local_fail = 0
+        with ThreadPoolExecutor(max_workers=worker_count) as ex:
+            # ex.map은 결과를 입력 순서대로 yield. chunksize=16으로 배치 IPC.
+            for i, result in enumerate(ex.map(_process_audio_candidate, args_list, chunksize=16)):
+                if result is None:
+                    local_fail += 1
+                else:
+                    local_rows.append(result)
+                done_total = start_offset + i + 1
+                if done_total % 500 == 0:
+                    print(json.dumps({
+                        "stage": "audio_analysis_progress",
+                        "executor": "ThreadPool",
+                        "done": done_total,
+                        "total": n_total + resume_skip,
+                    }, ensure_ascii=False))
+                # 체크포인트: 누적 rows (resume + 이전 풀의 결과 + 현재 local_rows)
+                if checkpoint_interval > 0 and (i + 1) % checkpoint_interval == 0:
+                    _save_checkpoint(rows + local_rows)
+        return local_fail, local_rows
+
+    def _run_processpool_resumable(args_list: list) -> tuple[int, list, int]:
+        """단일 ProcessPool(forkserver) 처리. 풀이 죽으면 (fail, rows, last_idx) 반환,
+        호출부가 last_idx부터 ThreadPool로 잔여 처리.
+
+        forkserver: 자식이 클린 템플릿에서 fork → 메인의 fd/state 상속 안 함 +
+        spawn처럼 매번 인터프리터 부팅하지 않아 빠름.
+        """
+        local_rows: list[dict] = []
+        local_fail = 0
+        last_completed = 0
+        forkserver_ctx = mp.get_context("forkserver")
+        try:
+            with ProcessPoolExecutor(
+                max_workers=worker_count,
+                mp_context=forkserver_ctx,
+                initializer=_init_worker,
+            ) as ex:
+                results_iter = ex.map(_process_audio_candidate, args_list, chunksize=64)
+                for i, result in enumerate(results_iter):
+                    if result is None:
+                        local_fail += 1
+                    else:
+                        local_rows.append(result)
+                    last_completed = i + 1
+                    if (i + 1) % 500 == 0:
+                        print(json.dumps({
+                            "stage": "audio_analysis_progress",
+                            "executor": "ProcessPool",
+                            "done": i + 1,
+                            "total": n_total + resume_skip,
+                            "rows_ok": len(local_rows),
+                            "fail": local_fail,
+                        }, ensure_ascii=False))
+                    # 체크포인트: 누적 rows
+                    if checkpoint_interval > 0 and (i + 1) % checkpoint_interval == 0:
+                        _save_checkpoint(rows + local_rows)
+        except BrokenProcessPool as exc:
+            print(json.dumps({
+                "warning": "broken_process_pool",
+                "completed_via_processpool": last_completed,
+                "remaining": n_total - last_completed,
+                "msg": str(exc)[:300],
+            }, ensure_ascii=False))
+        except Exception as exc:
+            # 기타 예외 (e.g. 워커 메모리 폭주) — 진단용 로그 + 폴백 진입
+            print(json.dumps({
+                "warning": "processpool_unexpected_exception",
+                "type": type(exc).__name__,
+                "completed": last_completed,
+                "msg": str(exc)[:300],
+            }, ensure_ascii=False))
+        return local_fail, local_rows, last_completed
+
+    if use_processes:
+        pp_fail, pp_rows, completed_idx = _run_processpool_resumable(task_args_all)
+        audio_signal_fail += pp_fail
+        rows.extend(pp_rows)
+        if completed_idx < n_total:
+            print(json.dumps({
+                "stage": "threadpool_fallback_start",
+                "remaining": n_total - completed_idx,
+            }, ensure_ascii=False))
+            tp_fail, tp_rows = _run_threadpool(task_args_all[completed_idx:], start_offset=completed_idx)
+            audio_signal_fail += tp_fail
+            rows.extend(tp_rows)
+    else:
+        tp_fail, tp_rows = _run_threadpool(task_args_all, start_offset=0)
+        audio_signal_fail += tp_fail
+        rows.extend(tp_rows)
+
+    print(json.dumps({
+        "stage": "audio_analysis_done",
+        "rows_ok_total": len(rows),
+        "fail_total": audio_signal_fail,
+        "total": n_total + resume_skip,
+    }, ensure_ascii=False))
+
+    # 최종 체크포인트 갱신 (완료 표식) — 다음 resume 시 모두 로드됨
+    if checkpoint_interval > 0:
+        _save_checkpoint(rows)
 
     return rows, {
         "scanned": scanned,
@@ -262,6 +503,9 @@ def build_rows_from_s3(
         "filtered_missing_audio": filtered_missing_audio,
         "audio_signal_fail": audio_signal_fail,
         "audio_name_count": len(audio_names),
+        "resume_skip": resume_skip,
+        "start_index": sliced_start,
+        "end_index": sliced_end,
     }
 
 
@@ -284,6 +528,19 @@ def main():
     parser.add_argument("--s3-rescue-on-empty", choices=["true", "false"], default="true")
     parser.add_argument("--val-labels-s3-uri", default="", help="Validation labels S3 URI (별도 평가셋)")
     parser.add_argument("--val-audio-s3-uri", default="", help="Validation audio S3 URI (별도 평가셋)")
+    # 병렬 처리 / 체크포인팅 / Validation 분리
+    parser.add_argument("--start-index", type=int, default=0,
+                        help="candidates 슬라이스 시작 (병렬 처리용). 0=처음부터.")
+    parser.add_argument("--end-index", type=int, default=0,
+                        help="candidates 슬라이스 끝 (exclusive). 0=끝까지.")
+    parser.add_argument("--output-suffix", default="",
+                        help="병렬 잡 구분용 파일명 접미사 (예: '_a', '_b').")
+    parser.add_argument("--checkpoint-interval", type=int, default=5000,
+                        help="매 N개 처리 후 부분 JSONL을 S3에 업로드해 작업 손실 방어. 0=비활성.")
+    parser.add_argument("--skip-validation-prep", choices=["true", "false"], default="false",
+                        help="true면 Validation 데이터 처리 스킵 (Training 전용 잡).")
+    parser.add_argument("--validation-only", choices=["true", "false"], default="false",
+                        help="true면 Validation 데이터만 처리 (Training 스킵). val-labels-s3-uri 필수.")
     args = parser.parse_args()
     use_audio_features = args.use_audio_features.lower() == "true"
     require_readable_audio = args.require_readable_audio.lower() == "true"
@@ -296,12 +553,38 @@ def main():
         raise ValueError("train/valid ratios must be positive and sum to <= 1")
     test_ratio = max(0.0, test_ratio)
 
+    validation_only = args.validation_only.lower() == "true"
+    skip_validation_prep = args.skip_validation_prep.lower() == "true"
+    suffix = args.output_suffix  # 예: "_a", "_b", 또는 "" (분할 모드)
+    parallel_mode = bool(suffix) or args.start_index > 0 or args.end_index > 0
+
+    # 출력 경로 계산 (Training 부분)
+    if args.output_dir:
+        out_dir = Path(args.output_dir)
+    else:
+        out_dir = Path("/tmp/ae_prepared")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    def _upload_to_s3(local_path: Path, key_name: str) -> None:
+        """output_s3_uri가 설정됐을 때 로컬 파일을 S3에 업로드."""
+        if not args.output_s3_uri:
+            return
+        bucket, prefix = parse_s3_uri(args.output_s3_uri.rstrip("/") + "/")
+        boto3.client("s3").upload_file(str(local_path), bucket, f"{prefix}{key_name}")
+        print(json.dumps({
+            "stage": "s3_upload",
+            "key": f"{prefix}{key_name}",
+            "local": str(local_path),
+            "size": local_path.stat().st_size,
+        }, ensure_ascii=False))
+
     label_dir = Path(args.labels_dir)
     audio_dir = Path(args.audio_dir)
     label_files = sorted(label_dir.rglob("*.json"))
     if args.max_files > 0:
         label_files = label_files[: args.max_files]
-    if not label_files:
+    # validation_only이면 Training 라벨 디렉토리가 비어있어도 OK
+    if not label_files and not validation_only:
         raise ValueError(f"No label files in {label_dir}")
 
     audio_files = sorted(audio_dir.rglob("*.wav"))
@@ -391,7 +674,13 @@ def main():
 
     fallback_used = False
     s3_fallback_stats = None
-    use_s3_fallback = len(rows) < 3 and args.labels_s3_uri and (allow_label_only_fallback or s3_rescue_on_empty or skip_local_loop)
+    # validation_only=true면 Training 처리 자체를 스킵
+    use_s3_fallback = (
+        not validation_only
+        and len(rows) < 3
+        and args.labels_s3_uri
+        and (allow_label_only_fallback or s3_rescue_on_empty or skip_local_loop)
+    )
     if use_s3_fallback:
         rows, s3_fallback_stats = build_rows_from_s3(
             args.labels_s3_uri,
@@ -399,6 +688,11 @@ def main():
             require_audio_exists=require_readable_audio,
             audio_s3_uri=args.audio_s3_uri,
             use_audio_features=use_audio_features,
+            start_index=args.start_index,
+            end_index=args.end_index,
+            checkpoint_interval=args.checkpoint_interval,
+            checkpoint_s3_uri=args.output_s3_uri,
+            checkpoint_name=f"rows_partial{suffix}",
         )
         fallback_used = True
         print(
@@ -413,83 +707,113 @@ def main():
             )
         )
 
-    if len(rows) < 3:
-        print(
-            json.dumps(
-                {
-                    "stage": "final_failure_summary",
-                    "prepared_rows": len(rows),
-                    "allow_label_only_fallback": allow_label_only_fallback,
-                    "s3_rescue_on_empty": s3_rescue_on_empty,
-                    "fallback_used": fallback_used,
-                    "s3_fallback_stats": s3_fallback_stats,
-                    "target_rows": args.target_rows,
-                },
-                ensure_ascii=False,
-            )
-        )
-        raise ValueError(f"Not enough prepared rows: {len(rows)}")
+    # === Training rows를 즉시 S3에 업로드 === (Validation 처리 전에 보존)
+    # parallel_mode(suffix 또는 인덱스 범위): rows{suffix}.jsonl로 저장, 분할 안 함
+    # 풀 모드(suffix=""): 기존대로 train/valid/test 분할 후 업로드
+    if not validation_only and len(rows) >= 1:
+        if parallel_mode:
+            # 부분 jsonl만 저장 — 분할은 merge 단계에서.
+            rows_path = out_dir / f"rows{suffix}.jsonl"
+            write_jsonl(rows_path, rows)
+            _upload_to_s3(rows_path, f"rows{suffix}.jsonl")
+            print(json.dumps({
+                "stage": "training_partial_uploaded",
+                "rows": len(rows),
+                "suffix": suffix,
+                "start_index": args.start_index,
+                "end_index": args.end_index,
+            }, ensure_ascii=False))
 
-    rng = random.Random(args.seed)
-    rng.shuffle(rows)
-
-    n = len(rows)
-    n_train = max(1, int(n * args.train_ratio))
-    n_valid = max(1, int(n * args.valid_ratio))
-    if n_train + n_valid >= n:
-        n_valid = max(1, n - n_train - 1)
-    n_test = n - n_train - n_valid
-    if n_test < 0:
-        # train + valid이 n보다 큰 경우 valid에서 조정
-        n_valid = max(1, n - n_train)
-        n_test = 0
-
-    train_rows = rows[:n_train]
-    valid_rows = rows[n_train : n_train + n_valid]
-    test_rows = rows[n_train + n_valid :]
-
-    # Pipeline mode: write to --output-dir, skip S3 upload
-    # Standalone mode: write to /tmp, upload to S3 via --output-s3-uri
-    if args.output_dir:
-        out_dir = Path(args.output_dir)
-    else:
-        out_dir = Path("/tmp/ae_prepared")
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # === 풀 모드 (parallel_mode=False) only: train/valid/test 분할 + 업로드 ===
+    train_rows: list[dict] = []
+    valid_rows: list[dict] = []
+    test_rows: list[dict] = []
     all_path = out_dir / "all.jsonl"
     train_path = out_dir / "train.jsonl"
     valid_path = out_dir / "valid.jsonl"
     test_path = out_dir / "test.jsonl"
-    write_jsonl(all_path, rows)
-    write_jsonl(train_path, train_rows)
-    write_jsonl(valid_path, valid_rows)
-    if test_rows:
-        write_jsonl(test_path, test_rows)
 
-    # Validation 데이터 처리 (별도 AIHub Validation 세트 → eval_validation.jsonl)
+    if not validation_only and not parallel_mode:
+        if len(rows) < 3:
+            print(
+                json.dumps(
+                    {
+                        "stage": "final_failure_summary",
+                        "prepared_rows": len(rows),
+                        "allow_label_only_fallback": allow_label_only_fallback,
+                        "s3_rescue_on_empty": s3_rescue_on_empty,
+                        "fallback_used": fallback_used,
+                        "s3_fallback_stats": s3_fallback_stats,
+                        "target_rows": args.target_rows,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            raise ValueError(f"Not enough prepared rows: {len(rows)}")
+
+        rng = random.Random(args.seed)
+        rng.shuffle(rows)
+
+        n = len(rows)
+        n_train = max(1, int(n * args.train_ratio))
+        n_valid = max(1, int(n * args.valid_ratio))
+        if n_train + n_valid >= n:
+            n_valid = max(1, n - n_train - 1)
+        n_test = n - n_train - n_valid
+        if n_test < 0:
+            n_valid = max(1, n - n_train)
+            n_test = 0
+
+        train_rows = rows[:n_train]
+        valid_rows = rows[n_train : n_train + n_valid]
+        test_rows = rows[n_train + n_valid :]
+
+        write_jsonl(all_path, rows)
+        write_jsonl(train_path, train_rows)
+        write_jsonl(valid_path, valid_rows)
+        if test_rows:
+            write_jsonl(test_path, test_rows)
+        # 즉시 S3 업로드 (Validation 처리 전에 보존)
+        _upload_to_s3(all_path, "all.jsonl")
+        _upload_to_s3(train_path, "train.jsonl")
+        _upload_to_s3(valid_path, "valid.jsonl")
+        if test_rows:
+            _upload_to_s3(test_path, "test.jsonl")
+        print(json.dumps({
+            "stage": "training_split_uploaded",
+            "counts": {"train": len(train_rows), "valid": len(valid_rows), "test": len(test_rows)},
+        }, ensure_ascii=False))
+
+    # === Validation 데이터 처리 (별도 AIHub Validation 세트 → eval_validation.jsonl) ===
+    # skip_validation_prep=true (병렬 잡)이면 스킵. 별도 Validation-only 잡에서 처리.
+    # parallel_mode이면 자동 스킵 (rows{suffix}.jsonl만 출력하고 종료).
     eval_val_rows: list[dict] = []
     val_stats: dict | None = None
-    if args.val_labels_s3_uri:
+    should_run_validation = (
+        not skip_validation_prep
+        and not parallel_mode
+        and bool(args.val_labels_s3_uri)
+    )
+    if validation_only:
+        # validation_only 모드: Training 스킵, Validation만 처리
+        should_run_validation = bool(args.val_labels_s3_uri)
+    if should_run_validation:
         print(json.dumps({"stage": "validation_processing_start", "val_labels_s3_uri": args.val_labels_s3_uri}, ensure_ascii=False))
         eval_val_rows, val_stats = build_rows_from_s3(
             args.val_labels_s3_uri,
             max_files=0,
             audio_s3_uri=args.val_audio_s3_uri,
             use_audio_features=use_audio_features,
+            checkpoint_interval=args.checkpoint_interval,
+            checkpoint_s3_uri=args.output_s3_uri,
+            checkpoint_name="rows_partial_val",
         )
         eval_val_path = out_dir / "eval_validation.jsonl"
         write_jsonl(eval_val_path, eval_val_rows)
+        _upload_to_s3(eval_val_path, "eval_validation.jsonl")
         print(json.dumps({"stage": "validation_processing_done", "eval_validation_rows": len(eval_val_rows), "stats": val_stats}, ensure_ascii=False))
 
-    if not args.output_dir and args.output_s3_uri:
-        bucket, prefix = parse_s3_uri(args.output_s3_uri.rstrip("/") + "/")
-        s3 = boto3.client("s3")
-        s3.upload_file(str(all_path), bucket, f"{prefix}all.jsonl")
-        s3.upload_file(str(train_path), bucket, f"{prefix}train.jsonl")
-        s3.upload_file(str(valid_path), bucket, f"{prefix}valid.jsonl")
-        if test_rows:
-            s3.upload_file(str(test_path), bucket, f"{prefix}test.jsonl")
-        if eval_val_rows:
-            s3.upload_file(str(out_dir / "eval_validation.jsonl"), bucket, f"{prefix}eval_validation.jsonl")
+    # (즉시 업로드 패턴으로 변경됨 — Training/Validation 각 처리 직후 _upload_to_s3 호출)
 
     print(
         json.dumps(

@@ -1,13 +1,16 @@
 """SpeechPT 통합 추론 핸들러 (SageMaker SDK 호환).
 
-3개 모델을 한 컨테이너에 로드하고 task 필드로 분기:
-  task=stt   → Whisper-small forward
-  task=ce    → ko-sroberta encode + similarity
-  task=ae    → wav2vec2-large + AEProbe forward (30초 청킹 자동)
+task 분기:
+  task=pipeline → SpeechPTPipeline.analyze() 전체 실행 (권장)
+                   문서 파싱 → STT → 정렬 → CE → AE → report → LLM 까지
+                   {document_s3, audio_s3} 입력, SpeechReport.to_dict() 반환
+  task=stt   → Whisper-small forward            (legacy / 디버깅용)
+  task=ce    → ko-sroberta encode + similarity   (legacy / 디버깅용)
+  task=ae    → wav2vec2-large + AEProbe forward  (legacy / 디버깅용)
 
 가드레일:
-  ① chunk_duration_sec ≤ 30 강제
-  ② Whisper는 HuggingFace 버전 사용 (CTranslate2 회피)
+  ① chunk_duration_sec ≤ 30 강제 (task=ae)
+  ② Whisper는 HuggingFace 버전 사용 (CTranslate2 회피, task=stt)
   ③ PYTORCH_CUDA_ALLOC_CONF (Dockerfile에서 ENV로)
   ④ MaxConcurrentInvocationsPerInstance=2 (Endpoint config에서)
 """
@@ -118,8 +121,28 @@ def model_fn(model_dir: str) -> Dict[str, Any]:
         _ = ae_probe(torch.randn(1, in_dim, device=device))
     logger.info("  ✓ JIT warmup done")
 
+    # 4. SpeechPTPipeline — task=pipeline 분기에서 사용
+    # speechpt 패키지는 Dockerfile에서 /opt/ml/code/speechpt 로 복사됨.
+    # 모델 가중치는 model_dir(=/opt/ml/model)에서 읽어들임 (ae_probe.pt, meta.bin, lora_adapter/).
+    pipeline = None
+    try:
+        from speechpt.pipeline import SpeechPTPipeline
+
+        runtime_config = os.environ.get(
+            "PIPELINE_RUNTIME_CONFIG",
+            "/opt/ml/code/configs/pipeline_runtime.yaml",
+        )
+        pipeline = SpeechPTPipeline(config_path=runtime_config, device=str(device))
+        # ae_probe.model_dir / report.template 경로 보정 — 패키징 이미지 기준
+        ae_probe_cfg = pipeline.ae_cfg.setdefault("ae_probe", {})
+        ae_probe_cfg.setdefault("model_dir", model_dir)
+        logger.info(f"  ✓ SpeechPTPipeline loaded (config={runtime_config})")
+    except Exception as exc:
+        logger.exception("SpeechPTPipeline init failed; task=pipeline will return error")
+
     return {
         "device": device,
+        "model_dir": model_dir,
         "stt_model": stt_model,
         "stt_processor": stt_processor,
         "stt_forced_ids": stt_forced_ids,
@@ -128,6 +151,7 @@ def model_fn(model_dir: str) -> Dict[str, Any]:
         "ae_backbone": ae_backbone,
         "ae_probe": ae_probe,
         "ae_in_dim": in_dim,
+        "pipeline": pipeline,
     }
 
 
@@ -142,8 +166,10 @@ def predict_fn(input_data: Dict[str, Any], models: Dict[str, Any]) -> Dict[str, 
     """task 필드로 분기."""
     task = input_data.get("task")
     if not task:
-        raise ValueError("missing 'task' field; expected one of: stt, ce, ae")
+        raise ValueError("missing 'task' field; expected one of: pipeline, stt, ce, ae")
 
+    if task == "pipeline":
+        return _run_pipeline(input_data, models)
     if task == "stt":
         return _run_stt(input_data, models)
     if task == "ce":
@@ -357,3 +383,73 @@ def _run_ae(input_data: Dict[str, Any], models: Dict[str, Any], chunk_sec: float
         })
 
     return {"segments": results}
+
+
+# ──────────────────────────────────────────────────────────────
+# task=pipeline — SpeechPTPipeline.analyze() 통째로 실행
+# ──────────────────────────────────────────────────────────────
+def _download_to_tmp(s3_uri: str, suffix: str = "") -> str:
+    """S3 URI(또는 로컬 경로)를 /tmp에 받아 로컬 경로 반환."""
+    import boto3
+    import tempfile
+
+    if not s3_uri.startswith("s3://"):
+        return s3_uri  # 이미 로컬 경로
+
+    bucket, key = s3_uri.replace("s3://", "").split("/", 1)
+    if not suffix:
+        suffix = os.path.splitext(key)[1] or ""
+    fd, local = tempfile.mkstemp(suffix=suffix)
+    os.close(fd)
+    boto3.client("s3").download_file(bucket, key, local)
+    return local
+
+
+def _run_pipeline(input_data: Dict[str, Any], models: Dict[str, Any]) -> Dict[str, Any]:
+    """발표 자료 + 음성을 받아 SpeechPTPipeline.analyze() 결과를 그대로 반환.
+
+    입력:
+        {
+          "task": "pipeline",
+          "document_s3": "s3://.../slides.pdf"     # 또는 document_path
+          "audio_s3":    "s3://.../audio.wav"      # 또는 audio_path
+          "alignment_mode": "auto" | "manual" | "hybrid"   # optional
+        }
+
+    출력 (SpeechReport.to_dict()):
+        {
+          "version", "overall_scores", "highlight_sections",
+          "per_slide_detail", "global_summary", "alignment",
+          "transcript_segments", "llm_feedback"
+        }
+    """
+    pipeline = models.get("pipeline")
+    if pipeline is None:
+        raise RuntimeError(
+            "SpeechPTPipeline not initialized (see model_fn logs). "
+            "task=pipeline cannot run."
+        )
+
+    document_uri = input_data.get("document_s3") or input_data.get("document_path")
+    audio_uri = input_data.get("audio_s3") or input_data.get("audio_path")
+    if not document_uri or not audio_uri:
+        raise ValueError("task=pipeline requires 'document_s3' and 'audio_s3' (or *_path).")
+
+    document_local = _download_to_tmp(document_uri)
+    audio_local = _download_to_tmp(audio_uri, suffix=".wav")
+
+    try:
+        report = pipeline.analyze(
+            document_path=document_local,
+            audio_path=audio_local,
+            alignment_mode=input_data.get("alignment_mode"),
+        )
+        return report.to_dict()
+    finally:
+        # 다운로드 파일 정리
+        for path in (document_local, audio_local):
+            if path and path.startswith("/tmp/"):
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass

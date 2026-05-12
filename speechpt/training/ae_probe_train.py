@@ -379,7 +379,9 @@ def main():
     parser.add_argument("--split-ratio", type=float, default=0.9)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-workers", type=int, default=2)
-    parser.add_argument("--use-lora", choices=["true", "false"], default="false", help="Enable LoRA fine-tuning on wav2vec2")
+    # SageMaker training toolkit이 "true"/"false" → Python bool 자동 변환 후 "True"/"False"로
+    # 명령줄에 다시 직렬화하므로 choices 제약을 제거하고 .lower() 비교만 사용.
+    parser.add_argument("--use-lora", default="false", help="Enable LoRA fine-tuning ('true'/'false')")
     parser.add_argument("--lora-r", type=int, default=16, help="LoRA rank")
     parser.add_argument("--lora-alpha", type=int, default=32, help="LoRA alpha scaling")
     parser.add_argument("--lora-dropout", type=float, default=0.05, help="LoRA dropout")
