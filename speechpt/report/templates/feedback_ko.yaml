@@ -3,26 +3,50 @@ issue_templates:
     issue: content_gap
     severity: high
     text: "슬라이드 {slide_id}에서 핵심 포인트 {missed}가 빠졌습니다. 다음 번에는 해당 내용을 명확히 언급하세요."
+  - id: content_gap_high_low_confidence
+    issue: content_gap
+    severity: low
+    text: "슬라이드 {slide_id}는 자동 정렬/의미 매칭 신뢰도가 낮아 일부 포인트({missed})가 약하게 측정되었습니다. 핵심 슬라이드라면 시작 문장에 주요 내용을 한 번 더 명확히 넣어보세요."
   - id: content_gap_mid
     issue: content_gap
     severity: medium
     text: "슬라이드 {slide_id} 일부 키포인트({missed})가 약하게 다뤄졌어요. 시간을 조금 더 할애해 주세요."
+  - id: content_gap_mid_low_confidence
+    issue: content_gap
+    severity: low
+    text: "슬라이드 {slide_id}의 일부 키포인트({missed})는 자동 매칭 기준에서 약하게 잡혔습니다. 실제 누락으로 단정하기보다는, 다음 녹음에서 해당 내용을 한 문장으로 더 선명하게 말해보세요."
   - id: content_gap_low
     issue: content_gap
     severity: low
     text: "슬라이드 {slide_id}에서 {missed} 언급이 짧았습니다. 보완하면 완성도가 올라갑니다."
+  - id: content_gap_low_low_confidence
+    issue: content_gap
+    severity: low
+    text: "슬라이드 {slide_id}에서 {missed} 관련 발화가 자동 매칭상 짧게 측정되었습니다. 중요 내용이라면 청중이 알아듣기 쉽게 한 번 더 풀어 말해보세요."
   - id: title_missing
     issue: title_missing
     severity: high
     text: "슬라이드 {slide_id}의 핵심 제목/주제({missed}) 설명이 빠졌습니다. 이 슬라이드가 무엇을 말하는지 먼저 한 문장으로 못 박아주세요."
+  - id: title_missing_low_confidence
+    issue: title_missing
+    severity: low
+    text: "슬라이드 {slide_id}의 제목/주제({missed})가 자동 매칭에서 약하게 잡혔습니다. 실제 누락으로 단정하기보다는, 슬라이드 시작 시 주제를 한 문장으로 먼저 말하면 안정적입니다."
   - id: bullet_missing
     issue: bullet_missing
     severity: medium
     text: "슬라이드 {slide_id}의 세부 포인트({missed}) 설명이 부족합니다. 제목만 말하지 말고 핵심 bullet을 순서대로 짚어주세요."
+  - id: bullet_missing_low_confidence
+    issue: bullet_missing
+    severity: low
+    text: "슬라이드 {slide_id}의 세부 포인트({missed})가 자동 매칭 기준에서 약하게 측정되었습니다. 중요한 bullet이라면 순서대로 짚는 연습을 권장합니다."
   - id: visual_not_explained
     issue: visual_not_explained
     severity: medium
     text: "슬라이드 {slide_id}의 시각자료 핵심({visual_missed}) 설명이 부족합니다. 차트/이미지 의미를 한 문장으로 명확히 설명하세요."
+  - id: visual_not_explained_low_confidence
+    issue: visual_not_explained
+    severity: low
+    text: "슬라이드 {slide_id}의 시각자료 관련 내용({visual_missed})은 자동 매칭에서 약하게 잡혔습니다. 차트나 이미지가 핵심이라면 의미를 한 문장으로 덧붙여보세요."
   - id: coverage_good
     issue: coverage_good
     severity: low

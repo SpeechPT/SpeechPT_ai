@@ -3,6 +3,17 @@ coherence:
   model_name: jhgan/ko-sroberta-multitask
   threshold: 0.55
   chunk_max_len: 120
+  scoring_v2:
+    semantic_low: 0.40
+    semantic_high: 0.80
+    keypoint_soft_low: 0.35
+    keypoint_soft_high: 0.75
+    semantic_weight: 0.45
+    soft_keypoint_weight: 0.45
+    presence_weight: 0.10
+    min_transcript_chars: 100
+    agreement_min_score: 0.55
+    single_signal_cap: 0.72
   alignment:
     mode: hybrid
     pause_threshold_sec: 0.9
@@ -139,6 +150,10 @@ stt:
   device: cpu
 report:
   template: speechpt/report/templates/feedback_ko.yaml
+  scoring:
+    ce_issue_semantic_threshold: 0.50
+    ce_issue_keypoint_threshold: 0.50
+    low_alignment_confidence_threshold: 0.06
   llm:
     enabled: false
     model: gpt-4.1-mini

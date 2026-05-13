@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, List, Sequence
@@ -44,6 +45,11 @@ ISSUE_WEIGHT = {
     "dwell_long": 1,
 }
 DEFAULT_TEMPLATE_TEXT = "슬라이드 {slide_id} 구간에 개선 포인트가 있습니다."
+CE_ISSUE_IDS = {"content_gap", "title_missing", "bullet_missing", "visual_not_explained"}
+GENERIC_VISUAL_PATTERN = re.compile(
+    r"^(chart_candidate|image|table|diagram|screenshot|bar_chart|line_chart|flowchart|none)(\s*x?\d+)?$",
+    re.IGNORECASE,
+)
 
 
 def _load_templates(path: Path) -> Dict:
@@ -61,6 +67,24 @@ def _coverage_score(ce_results: Sequence[SlideCoherenceResult]) -> float:
     if not ce_results:
         return 0.0
     return float(np.mean([c.coverage for c in ce_results]) * 100)
+
+
+def _keypoint_coverage(ce: SlideCoherenceResult | None) -> float:
+    if ce is None:
+        return 0.0
+    value = getattr(ce, "keypoint_coverage", None)
+    if value is None:
+        return float(ce.coverage)
+    return float(value)
+
+
+def _semantic_coverage(ce: SlideCoherenceResult | None) -> float:
+    if ce is None:
+        return 0.0
+    value = getattr(ce, "semantic_coverage", None)
+    if value is None:
+        return float(ce.coverage)
+    return float(value)
 
 
 def _delivery_stability(ae_results: Sequence[SegmentAttitude]) -> float:
@@ -95,29 +119,66 @@ def _split_missed_keypoints(ce: SlideCoherenceResult | None) -> tuple[List[str],
     return text_missed, visual_missed
 
 
+def _is_generic_visual_miss(item: str) -> bool:
+    normalized = item.replace("VISUAL: ", "", 1).strip()
+    return bool(GENERIC_VISUAL_PATTERN.fullmatch(normalized))
+
+
+def _is_low_alignment_confidence(alignment: Dict | None, scoring_cfg: Dict) -> bool:
+    if not alignment:
+        return False
+    confidence = alignment.get("confidence")
+    if confidence is None:
+        return False
+    threshold = float(scoring_cfg.get("low_alignment_confidence_threshold", 0.06))
+    return float(confidence) < threshold
+
+
+def _mark_low_confidence(issue: Dict, low_confidence: bool) -> Dict:
+    if low_confidence and issue.get("id") in CE_ISSUE_IDS:
+        issue = dict(issue)
+        issue["low_confidence"] = True
+    return issue
+
+
 def _issue_from_slide(
     ce: SlideCoherenceResult | None,
     ae: SegmentAttitude | None,
     config: Dict | None = None,
+    alignment: Dict | None = None,
 ) -> List[Dict]:
     cfg = config or {}
     scoring_cfg = cfg.get("scoring", cfg)
     dwell_short_z = float(scoring_cfg.get("dwell_short_z_threshold", -1.5))
     dwell_long_z = float(scoring_cfg.get("dwell_long_z_threshold", 2.0))
+    ce_semantic_threshold = float(scoring_cfg.get("ce_issue_semantic_threshold", 0.50))
+    ce_keypoint_threshold = float(scoring_cfg.get("ce_issue_keypoint_threshold", 0.50))
+    low_alignment_confidence = _is_low_alignment_confidence(alignment, scoring_cfg)
     issues: List[Dict] = []
     text_missed, visual_missed = _split_missed_keypoints(ce)
     source_missed = ce.source_missed_keypoints if ce and ce.source_missed_keypoints else {}
     title_missed = source_missed.get("title", [])
     bullet_missed = source_missed.get("bullet", [])
+    content_issue_allowed = bool(
+        ce
+        and _semantic_coverage(ce) < ce_semantic_threshold
+        and _keypoint_coverage(ce) <= ce_keypoint_threshold
+    )
 
-    if title_missed:
-        issues.append({"id": "title_missing", "missed": title_missed})
-    if ce and ce.coverage < 0.7 and bullet_missed:
-        issues.append({"id": "bullet_missing", "missed": bullet_missed})
-    elif ce and ce.coverage < 0.7 and text_missed and not title_missed:
-        issues.append({"id": "content_gap", "missed": text_missed})
-    if visual_missed:
-        issues.append({"id": "visual_not_explained", "visual_missed": visual_missed})
+    if title_missed and content_issue_allowed:
+        issues.append(_mark_low_confidence({"id": "title_missing", "missed": title_missed}, low_alignment_confidence))
+    if content_issue_allowed and bullet_missed:
+        issues.append(_mark_low_confidence({"id": "bullet_missing", "missed": bullet_missed}, low_alignment_confidence))
+    elif content_issue_allowed and text_missed and not title_missed:
+        issues.append(_mark_low_confidence({"id": "content_gap", "missed": text_missed}, low_alignment_confidence))
+    actionable_visual_missed = [item for item in visual_missed if not _is_generic_visual_miss(item)]
+    if actionable_visual_missed:
+        issues.append(
+            _mark_low_confidence(
+                {"id": "visual_not_explained", "visual_missed": actionable_visual_missed},
+                low_alignment_confidence,
+            )
+        )
 
     if ae:
         silence = ae.features.get("silence_ratio", 0.0)
@@ -140,10 +201,14 @@ def _issue_from_slide(
     return issues
 
 
-def _severity_score(issue_ids: List[str]) -> int:
+def _severity_score(issues: List[Dict]) -> int:
     score = 0
-    for issue_id in issue_ids:
-        score += ISSUE_WEIGHT.get(issue_id, 1)
+    for issue in issues:
+        issue_id = issue["id"]
+        weight = ISSUE_WEIGHT.get(issue_id, 1)
+        if issue.get("low_confidence") and issue_id in CE_ISSUE_IDS:
+            weight = max(1, weight - 2)
+        score += weight
     return score
 
 
@@ -188,11 +253,16 @@ def generate_report(
     version: str = "0.3.0",
     alignment: Dict | None = None,
     attitude_config: Dict | None = None,
+    report_config: Dict | None = None,
     transcript_segments: Sequence[Dict] | None = None,
 ) -> SpeechReport:
     templates = _load_templates(Path(template_path))
     issue_templates = templates.get("issue_templates", [])
     summary_templates = templates.get("summary_templates", [])
+    report_scoring_cfg = {
+        **((attitude_config or {}).get("scoring", {})),
+        **((report_config or {}).get("scoring", {})),
+    }
 
     ae_map = {item.slide_id: item for item in ae_results}
     ce_map = {item.slide_id: item for item in ce_results}
@@ -207,13 +277,17 @@ def generate_report(
     for slide_id in sorted(set(list(ae_map.keys()) + list(ce_map.keys()))):
         ce = ce_map.get(slide_id)
         ae = ae_map.get(slide_id)
-        issues = _issue_from_slide(ce, ae, config=attitude_config)
+        issues = _issue_from_slide(ce, ae, config=report_scoring_cfg, alignment=alignment)
         issue_ids = [issue["id"] for issue in issues]
-        severity = _severity_score(issue_ids)
+        severity = _severity_score(issues)
 
         feedbacks: List[Dict] = []
         for issue in issues:
             tid = _template_id_for_issue(issue["id"], ce)
+            if issue.get("low_confidence"):
+                low_confidence_tid = f"{tid}_low_confidence"
+                if _select_template(low_confidence_tid, issue_templates):
+                    tid = low_confidence_tid
             feedbacks.append(_render_feedback(_select_template(tid, issue_templates), slide_id, issue))
 
         if severity > 0:
@@ -236,6 +310,9 @@ def generate_report(
             {
                 "slide_id": slide_id,
                 "coverage": ce.coverage if ce else None,
+                "semantic_coverage": ce.semantic_coverage if ce else None,
+                "soft_keypoint_coverage": ce.soft_keypoint_coverage if ce else None,
+                "keypoint_coverage": ce.keypoint_coverage if ce else None,
                 "source_coverage": ce.source_coverage if ce and ce.source_coverage else {},
                 "missed": text_missed,
                 "visual_missed": visual_missed,

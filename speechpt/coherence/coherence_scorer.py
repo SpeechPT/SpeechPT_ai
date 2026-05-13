@@ -36,6 +36,11 @@ class SlideCoherenceResult:
     evidence_spans: List[Dict]
     source_coverage: Dict[str, float] | None = None
     source_missed_keypoints: Dict[str, List[str]] | None = None
+    semantic_coverage: float | None = None
+    soft_keypoint_coverage: float | None = None
+    keypoint_coverage: float | None = None
+    transcript_presence: float | None = None
+    scoring_version: str = "v2"
 
 
 def _chunk_transcript(text: str, max_len: int = 120) -> List[str]:
@@ -56,18 +61,63 @@ def _chunk_transcript(text: str, max_len: int = 120) -> List[str]:
     return chunks
 
 
+def _rescale_similarity(value: float, low: float, high: float) -> float:
+    if high <= low:
+        return float(value)
+    return float(np.clip((value - low) / (high - low), 0.0, 1.0))
+
+
+def _weighted_mean_embedding(embeddings: np.ndarray, weights: np.ndarray | None = None) -> np.ndarray:
+    if embeddings.size == 0:
+        return np.zeros((0,), dtype=float)
+    if weights is None:
+        vector = np.mean(embeddings, axis=0)
+    else:
+        safe_weights = np.maximum(weights.astype(float), 0.0)
+        if float(np.sum(safe_weights)) <= 1e-8:
+            vector = np.mean(embeddings, axis=0)
+        else:
+            vector = np.average(embeddings, axis=0, weights=safe_weights)
+    norm = float(np.linalg.norm(vector))
+    if norm <= 1e-8:
+        return vector
+    return vector / norm
+
+
+def _weighted_score(values: np.ndarray, weights: np.ndarray) -> float:
+    total = float(np.sum(weights)) + 1e-8
+    return float(np.sum(values * weights) / total)
+
+
 def score_slide(
     keypoints: List[Keypoint],
     transcript: TranscriptSegment,
     model_name: str = "jhgan/ko-sroberta-multitask",
     threshold: float = 0.55,
+    scoring_config: Dict | None = None,
 ) -> SlideCoherenceResult:
+    cfg = scoring_config or {}
+    semantic_low = float(cfg.get("semantic_low", 0.40))
+    semantic_high = float(cfg.get("semantic_high", 0.80))
+    keypoint_soft_low = float(cfg.get("keypoint_soft_low", 0.35))
+    keypoint_soft_high = float(cfg.get("keypoint_soft_high", 0.75))
+    semantic_weight = float(cfg.get("semantic_weight", 0.45))
+    soft_keypoint_weight = float(cfg.get("soft_keypoint_weight", 0.45))
+    presence_weight = float(cfg.get("presence_weight", 0.10))
+    min_transcript_chars = float(cfg.get("min_transcript_chars", 30.0))
+    single_signal_cap = float(cfg.get("single_signal_cap", 0.72))
+    agreement_min_score = float(cfg.get("agreement_min_score", 0.55))
+
     if not keypoints:
         return SlideCoherenceResult(
             slide_id=transcript.slide_id,
             coverage=0.0,
             missed_keypoints=[],
             evidence_spans=[],
+            semantic_coverage=0.0,
+            soft_keypoint_coverage=0.0,
+            keypoint_coverage=0.0,
+            transcript_presence=0.0,
         )
 
     model = _get_model(model_name)
@@ -82,6 +132,10 @@ def score_slide(
             coverage=0.0,
             missed_keypoints=kp_texts,
             evidence_spans=[],
+            semantic_coverage=0.0,
+            soft_keypoint_coverage=0.0,
+            keypoint_coverage=0.0,
+            transcript_presence=0.0,
         )
     ch_emb = model.encode(chunks, convert_to_numpy=True, normalize_embeddings=True)
 
@@ -91,7 +145,28 @@ def score_slide(
 
     covered_importance = kp_importance[covered_mask].sum()
     total_importance = kp_importance.sum() + 1e-8
-    coverage = float(covered_importance / total_importance)
+    keypoint_coverage = float(covered_importance / total_importance)
+    soft_scores = np.array([_rescale_similarity(float(score), keypoint_soft_low, keypoint_soft_high) for score in max_sim])
+    soft_keypoint_coverage = _weighted_score(soft_scores, kp_importance)
+
+    slide_vector = _weighted_mean_embedding(kp_emb, kp_importance)
+    transcript_vector = _weighted_mean_embedding(ch_emb)
+    raw_semantic = float(np.dot(slide_vector, transcript_vector)) if slide_vector.size and transcript_vector.size else 0.0
+    semantic_coverage = _rescale_similarity(raw_semantic, semantic_low, semantic_high)
+    transcript_presence = float(np.clip(len(transcript.text.strip()) / max(min_transcript_chars, 1.0), 0.0, 1.0))
+
+    total_weight = semantic_weight + soft_keypoint_weight + presence_weight
+    if total_weight <= 1e-8:
+        coverage = keypoint_coverage
+    else:
+        coverage = (
+            semantic_weight * semantic_coverage
+            + soft_keypoint_weight * soft_keypoint_coverage
+            + presence_weight * transcript_presence
+        ) / total_weight
+    if min(semantic_coverage, soft_keypoint_coverage) < agreement_min_score:
+        coverage = min(float(coverage), single_signal_cap)
+    coverage = float(np.clip(coverage, 0.0, 1.0))
 
     source_coverage: Dict[str, float] = {}
     source_missed_keypoints: Dict[str, List[str]] = {}
@@ -124,6 +199,10 @@ def score_slide(
         evidence_spans=evidence_spans,
         source_coverage=source_coverage,
         source_missed_keypoints=source_missed_keypoints,
+        semantic_coverage=semantic_coverage,
+        soft_keypoint_coverage=soft_keypoint_coverage,
+        keypoint_coverage=keypoint_coverage,
+        transcript_presence=transcript_presence,
     )
 
 

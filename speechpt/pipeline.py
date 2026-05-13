@@ -233,6 +233,7 @@ class SpeechPTPipeline:
                     segment,
                     model_name=self.ce_cfg.get("model_name", "jhgan/ko-sroberta-multitask"),
                     threshold=self.ce_cfg.get("threshold", 0.55),
+                    scoring_config=self.ce_cfg.get("scoring_v2", {}),
                 )
             )
         done()
@@ -315,6 +316,7 @@ class SpeechPTPipeline:
             version=self.cfg.get("version", "0.3.0"),
             alignment=alignment.to_dict(),
             attitude_config=self.ae_cfg,
+            report_config=self.cfg.get("report", {}),
             transcript_segments=_serialize_transcript_segments(segments),
         )
         done()

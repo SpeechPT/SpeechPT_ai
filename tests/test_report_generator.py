@@ -23,6 +23,8 @@ def test_generate_report_has_expected_sections():
             evidence_spans=[],
             source_coverage={"title": 0.0, "visual": 0.0},
             source_missed_keypoints={"title": ["결론"], "visual": ["VISUAL: 매출 차트"]},
+            semantic_coverage=0.2,
+            keypoint_coverage=0.2,
         ),
     ]
     ae_results = [
@@ -143,3 +145,77 @@ def test_generate_report_adds_dwell_feedback():
     detail1 = [x for x in payload["per_slide_detail"] if x["slide_id"] == 1][0]
     assert detail1["dwell_sec"] == 5.0
     assert detail1["dwell_ratio"] == 0.1
+
+
+def test_generate_report_softens_ce_feedback_when_alignment_confidence_is_low():
+    ce_results = [
+        SlideCoherenceResult(
+            slide_id=1,
+            coverage=0.2,
+            missed_keypoints=["핵심 주제"],
+            evidence_spans=[],
+            source_coverage={"title": 0.0},
+            source_missed_keypoints={"title": ["핵심 주제"]},
+            keypoint_coverage=0.2,
+        )
+    ]
+
+    report = generate_report(
+        ce_results=ce_results,
+        ae_results=[],
+        template_path=Path("speechpt/report/templates/feedback_ko.yaml"),
+        alignment={"confidence": 0.04},
+        report_config={"scoring": {"low_alignment_confidence_threshold": 0.05}},
+    )
+
+    payload = report.to_dict()
+    feedback = payload["highlight_sections"][0]["feedback"][0]
+    assert feedback["severity"] == "low"
+    assert "자동 매칭" in feedback["text"]
+
+
+def test_generate_report_does_not_create_ce_issue_for_semantic_paraphrase_match():
+    ce_results = [
+        SlideCoherenceResult(
+            slide_id=1,
+            coverage=0.50,
+            missed_keypoints=["표현이 다른 핵심 주장"],
+            evidence_spans=[],
+            source_coverage={"title": 0.0},
+            source_missed_keypoints={"title": ["표현이 다른 핵심 주장"]},
+            semantic_coverage=0.90,
+            soft_keypoint_coverage=0.20,
+            keypoint_coverage=0.20,
+        )
+    ]
+
+    report = generate_report(
+        ce_results=ce_results,
+        ae_results=[],
+        template_path=Path("speechpt/report/templates/feedback_ko.yaml"),
+        report_config={"scoring": {"ce_issue_semantic_threshold": 0.50, "ce_issue_keypoint_threshold": 0.50}},
+    )
+
+    assert report.to_dict()["highlight_sections"] == []
+
+
+def test_generate_report_ignores_generic_visual_miss():
+    ce_results = [
+        SlideCoherenceResult(
+            slide_id=1,
+            coverage=0.9,
+            missed_keypoints=["VISUAL: chart_candidate x1", "VISUAL: image x2"],
+            evidence_spans=[],
+            source_coverage={"visual": 0.0},
+            source_missed_keypoints={"visual": ["VISUAL: chart_candidate x1", "VISUAL: image x2"]},
+            keypoint_coverage=0.9,
+        )
+    ]
+
+    report = generate_report(
+        ce_results=ce_results,
+        ae_results=[],
+        template_path=Path("speechpt/report/templates/feedback_ko.yaml"),
+    )
+
+    assert report.to_dict()["highlight_sections"] == []
