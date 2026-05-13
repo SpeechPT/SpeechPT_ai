@@ -194,6 +194,49 @@ def test_pipeline_runtime_stt_override_enables_transcription(monkeypatch, tmp_pa
     assert result["words"][0]["word"] == "테스트"
 
 
+def test_pipeline_runtime_vlm_override_enables_high_quality(tmp_path: Path):
+    cfg = {
+        "version": "0.3.0",
+        "coherence": {
+            "model_name": "dummy",
+            "threshold": 0.55,
+            "vlm_caption": {
+                "enabled": False,
+                "model": "gpt-4.1-mini",
+                "detail": "low",
+                "cache_enabled": True,
+            },
+        },
+        "attitude": {"wav2vec2": {"use_probe": False}},
+        "stt": {"enabled": False},
+        "report": {"template": "speechpt/report/templates/feedback_ko.yaml"},
+    }
+    cfg_path = tmp_path / "pipeline.yaml"
+    cfg_path.write_text(json.dumps(cfg))
+
+    pipeline = SpeechPTPipeline(str(cfg_path))
+    pipeline.apply_runtime_overrides(
+        {
+            "vlm_caption": {
+                "enabled": True,
+                "model": "gpt-4.1",
+                "detail": "high",
+                "cache_enabled": False,
+                "dpi": 180,
+                "timeout_sec": 120.0,
+            }
+        }
+    )
+
+    vlm_cfg = pipeline.ce_cfg["vlm_caption"]
+    assert vlm_cfg["enabled"] is True
+    assert vlm_cfg["model"] == "gpt-4.1"
+    assert vlm_cfg["detail"] == "high"
+    assert vlm_cfg["cache_enabled"] is False
+    assert vlm_cfg["dpi"] == 180
+    assert vlm_cfg["timeout_sec"] == 120.0
+
+
 def test_pipeline_keeps_all_slides_when_middle_segment_is_empty(monkeypatch, tmp_path: Path):
     cfg = {
         "version": "0.3.0",

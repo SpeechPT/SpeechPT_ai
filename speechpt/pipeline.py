@@ -71,6 +71,12 @@ class SpeechPTPipeline:
         for key, value in stt_overrides.items():
             if value is not None:
                 self.stt_cfg[key] = value
+        vlm_overrides = overrides.get("vlm_caption", {})
+        if vlm_overrides:
+            vlm_cfg = self.ce_cfg.setdefault("vlm_caption", {})
+            for key, value in vlm_overrides.items():
+                if value is not None:
+                    vlm_cfg[key] = value
 
     def _time(self, desc: str):
         start = time.perf_counter()
@@ -364,6 +370,18 @@ def main():
     parser.add_argument("--stt-language", default=None, help="Override STT language")
     parser.add_argument("--stt-compute-type", default=None, help="Override STT compute type")
     parser.add_argument("--stt-device", default=None, help="Override STT device")
+    parser.add_argument("--vlm-enabled", action="store_true", help="Force-enable VLM slide captioning for alignment.")
+    parser.add_argument(
+        "--vlm-high-quality",
+        action="store_true",
+        help="Force-enable VLM captioning with high image detail. This may increase latency/cost.",
+    )
+    parser.add_argument("--vlm-model", default=None, help="Override VLM caption model name")
+    parser.add_argument("--vlm-detail", default=None, choices=["low", "high", "auto"], help="Override VLM image detail")
+    parser.add_argument("--vlm-cache-dir", default=None, help="Override VLM caption cache directory")
+    parser.add_argument("--vlm-timeout-sec", default=None, type=float, help="Override VLM request timeout")
+    parser.add_argument("--vlm-dpi", default=None, type=int, help="Override PDF render DPI for VLM images")
+    parser.add_argument("--vlm-no-cache", action="store_true", help="Disable VLM caption cache for this run")
     parser.add_argument("--save-whisper-json", default=None, help="Optional path to save the STT result JSON")
     args = parser.parse_args()
 
@@ -385,7 +403,16 @@ def main():
                 "language": args.stt_language,
                 "compute_type": args.stt_compute_type,
                 "device": args.stt_device,
-            }
+            },
+            "vlm_caption": {
+                "enabled": True if (args.vlm_enabled or args.vlm_high_quality) else None,
+                "model": args.vlm_model,
+                "detail": args.vlm_detail or ("high" if args.vlm_high_quality else None),
+                "cache_dir": args.vlm_cache_dir,
+                "timeout_sec": args.vlm_timeout_sec,
+                "dpi": args.vlm_dpi,
+                "cache_enabled": False if args.vlm_no_cache else None,
+            },
         }
     )
     if whisper_result is None and args.save_whisper_json:
