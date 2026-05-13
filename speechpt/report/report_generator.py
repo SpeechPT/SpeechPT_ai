@@ -146,6 +146,14 @@ def _semantic_coverage(ce: SlideCoherenceResult | None) -> float:
 def _delivery_stability(ae_results: Sequence[SegmentAttitude]) -> float:
     if not ae_results:
         return 50.0
+    probe_scores = [
+        float(seg.features["ae_probe_overall_delivery"])
+        for seg in ae_results
+        if seg.features and "ae_probe_overall_delivery" in seg.features
+    ]
+    if probe_scores:
+        mean_probe_score = float(np.mean(probe_scores))
+        return float(max(0.0, min(100.0, mean_probe_score * 100.0)))
     total_anomalies = sum(len(seg.anomaly_flags) for seg in ae_results)
     denom = len(ae_results) * 3 + 1e-8
     return float(max(0.0, 100.0 * (1.0 - min(1.0, total_anomalies / denom))))

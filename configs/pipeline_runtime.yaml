@@ -113,10 +113,11 @@ attitude:
   ae_probe:
     enabled: true
     model_dir: /opt/ml/model
+    model_artifact_s3: "s3://aws-s3-speechpt1/pipeline/ae/20260424-092203/models/pipelines-egwgy378cgla-AE-Train-IqETfwZjh8/output/model.tar.gz"
     hf_model: "kresnik/wav2vec2-large-xlsr-korean"
     sample_rate: 16000
     device: auto
-    fail_open: true
+    fail_open: false
 stt:
   enabled: true
   backend: faster-whisper

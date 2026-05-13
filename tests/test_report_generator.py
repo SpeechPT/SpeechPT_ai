@@ -148,6 +148,50 @@ def test_generate_report_adds_dwell_feedback():
     assert detail1["dwell_ratio"] == 0.1
 
 
+def test_generate_report_uses_ae_probe_overall_delivery_for_delivery_stability():
+    ce_results = [SlideCoherenceResult(slide_id=1, coverage=0.9, missed_keypoints=[], evidence_spans=[])]
+    ae_results = [
+        SegmentAttitude(
+            slide_id=1,
+            start_sec=0.0,
+            end_sec=10.0,
+            features={
+                "avg_speech_rate": 3.0,
+                "silence_ratio": 0.0,
+                "filler_count": 0,
+                "ae_probe_overall_delivery": 0.64,
+            },
+            change_points=[],
+            trend_label="stable",
+            anomaly_flags=[],
+            fillers=[],
+        ),
+        SegmentAttitude(
+            slide_id=2,
+            start_sec=10.0,
+            end_sec=20.0,
+            features={
+                "avg_speech_rate": 3.0,
+                "silence_ratio": 0.0,
+                "filler_count": 0,
+                "ae_probe_overall_delivery": 0.84,
+            },
+            change_points=[],
+            trend_label="stable",
+            anomaly_flags=[],
+            fillers=[],
+        ),
+    ]
+
+    report = generate_report(
+        ce_results=ce_results,
+        ae_results=ae_results,
+        template_path=Path("speechpt/report/templates/feedback_ko.yaml"),
+    )
+
+    assert report.to_dict()["overall_scores"]["delivery_stability"] == 74.0
+
+
 def test_generate_report_softens_ce_feedback_when_alignment_confidence_is_low():
     ce_results = [
         SlideCoherenceResult(
