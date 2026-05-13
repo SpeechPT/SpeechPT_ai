@@ -17,7 +17,7 @@ from speechpt.attitude.ae_probe_runtime import predict_segments as predict_ae_pr
 from speechpt.attitude.audio_feature_extractor import extract_audio_features
 from speechpt.attitude.change_point_detector import detect_change_points
 from speechpt.attitude.wav2vec2_embedder import Wav2Vec2Embedder
-from speechpt.coherence import auto_aligner, coherence_scorer, document_parser, keypoint_extractor, transcript_aligner, vlm_caption
+from speechpt.coherence import auto_aligner, coherence_scorer, document_parser, keypoint_extractor, slide_role_classifier, transcript_aligner, vlm_caption
 from speechpt.coherence.keypoint_extractor import Keypoint
 from speechpt.coherence.visual_captioner import build_visual_captions
 from speechpt.coherence.visual_ocr import enrich_slides_with_visual_ocr
@@ -185,6 +185,7 @@ class SpeechPTPipeline:
                 vlm_captions = vlm_result.slides
                 vlm_presentation = vlm_result.presentation
             done()
+        slide_roles = slide_role_classifier.classify_slide_roles(slides, vlm_captions)
         alignment_keypoints = self._build_alignment_keypoints(slide_keypoints, vlm_captions, vlm_presentation)
 
         requested_alignment_mode = alignment_mode or self.ce_cfg.get("alignment", {}).get("mode")
@@ -318,6 +319,7 @@ class SpeechPTPipeline:
             attitude_config=self.ae_cfg,
             report_config=self.cfg.get("report", {}),
             transcript_segments=_serialize_transcript_segments(segments),
+            slide_roles=slide_roles,
         )
         done()
 

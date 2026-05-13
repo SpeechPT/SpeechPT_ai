@@ -14,6 +14,7 @@ import yaml
 
 from speechpt.attitude.attitude_scorer import SegmentAttitude
 from speechpt.coherence.coherence_scorer import SlideCoherenceResult
+from speechpt.coherence.slide_role_classifier import SlideRole
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -50,6 +51,25 @@ GENERIC_VISUAL_PATTERN = re.compile(
     r"^(chart_candidate|image|table|diagram|screenshot|bar_chart|line_chart|flowchart|none)(\s*x?\d+)?$",
     re.IGNORECASE,
 )
+GENERIC_TITLE_TERMS = {
+    "개요",
+    "목차",
+    "소개",
+    "팀소개",
+    "팀 소개",
+    "프로젝트소개",
+    "프로젝트 소개",
+    "진행현황",
+    "진행 현황",
+    "실험결과",
+    "실험 결과",
+    "결론",
+    "향후계획",
+    "향후 계획",
+    "기대효과",
+    "기대 효과",
+    "감사합니다",
+}
 
 
 def _load_templates(path: Path) -> Dict:
@@ -63,10 +83,46 @@ def _select_template(template_id: str, templates: List[Dict]) -> Dict | None:
     return None
 
 
-def _coverage_score(ce_results: Sequence[SlideCoherenceResult]) -> float:
+def _coverage_score_all(ce_results: Sequence[SlideCoherenceResult]) -> float:
     if not ce_results:
         return 0.0
     return float(np.mean([c.coverage for c in ce_results]) * 100)
+
+
+def _coverage_weight(slide_id: int, slide_roles: Dict[int, SlideRole] | None, scoring_cfg: Dict | None = None) -> float:
+    if not slide_roles or slide_id not in slide_roles:
+        return 1.0
+    role = slide_roles[slide_id]
+    role_weights = (scoring_cfg or {}).get("role_coverage_weights", {})
+    return float(role_weights.get(role.role, role.coverage_weight))
+
+
+def _coverage_score(
+    ce_results: Sequence[SlideCoherenceResult],
+    slide_roles: Dict[int, SlideRole] | None = None,
+    scoring_cfg: Dict | None = None,
+) -> float:
+    if not ce_results:
+        return 0.0
+    weighted_values = []
+    weights = []
+    for result in ce_results:
+        weight = _coverage_weight(result.slide_id, slide_roles, scoring_cfg)
+        if weight <= 0:
+            continue
+        weighted_values.append(float(result.coverage) * weight)
+        weights.append(weight)
+    if not weights:
+        return _coverage_score_all(ce_results)
+    return float((sum(weighted_values) / sum(weights)) * 100)
+
+
+def _coverage_scored_slide_count(
+    ce_results: Sequence[SlideCoherenceResult],
+    slide_roles: Dict[int, SlideRole] | None = None,
+    scoring_cfg: Dict | None = None,
+) -> int:
+    return sum(1 for result in ce_results if _coverage_weight(result.slide_id, slide_roles, scoring_cfg) > 0)
 
 
 def _keypoint_coverage(ce: SlideCoherenceResult | None) -> float:
@@ -124,6 +180,20 @@ def _is_generic_visual_miss(item: str) -> bool:
     return bool(GENERIC_VISUAL_PATTERN.fullmatch(normalized))
 
 
+def _is_actionable_title_miss(item: str) -> bool:
+    normalized = " ".join(item.strip().split())
+    compact = normalized.replace(" ", "")
+    if not compact:
+        return False
+    if ":" in normalized or any(ch.isascii() and ch.isalnum() for ch in normalized):
+        return True
+    if normalized in GENERIC_TITLE_TERMS or compact in {term.replace(" ", "") for term in GENERIC_TITLE_TERMS}:
+        return False
+    if any(term.replace(" ", "") in compact for term in GENERIC_TITLE_TERMS) and len(compact) <= 12:
+        return False
+    return len(compact) >= 12
+
+
 def _is_low_alignment_confidence(alignment: Dict | None, scoring_cfg: Dict) -> bool:
     if not alignment:
         return False
@@ -146,6 +216,7 @@ def _issue_from_slide(
     ae: SegmentAttitude | None,
     config: Dict | None = None,
     alignment: Dict | None = None,
+    slide_role: SlideRole | None = None,
 ) -> List[Dict]:
     cfg = config or {}
     scoring_cfg = cfg.get("scoring", cfg)
@@ -159,20 +230,25 @@ def _issue_from_slide(
     source_missed = ce.source_missed_keypoints if ce and ce.source_missed_keypoints else {}
     title_missed = source_missed.get("title", [])
     bullet_missed = source_missed.get("bullet", [])
+    actionable_title_missed = [item for item in title_missed if _is_actionable_title_miss(item)]
+    non_actionable_title_missed = set(title_missed) - set(actionable_title_missed)
+    text_missed_for_content = [item for item in text_missed if item not in non_actionable_title_missed]
     content_issue_allowed = bool(
         ce
         and _semantic_coverage(ce) < ce_semantic_threshold
         and _keypoint_coverage(ce) <= ce_keypoint_threshold
     )
+    suppress_title_missing = bool(slide_role and slide_role.suppress_title_missing)
+    suppress_content_issues = bool(slide_role and slide_role.suppress_content_issues)
 
-    if title_missed and content_issue_allowed:
-        issues.append(_mark_low_confidence({"id": "title_missing", "missed": title_missed}, low_alignment_confidence))
-    if content_issue_allowed and bullet_missed:
+    if actionable_title_missed and content_issue_allowed and not suppress_title_missing:
+        issues.append(_mark_low_confidence({"id": "title_missing", "missed": actionable_title_missed}, low_alignment_confidence))
+    if content_issue_allowed and bullet_missed and not suppress_content_issues:
         issues.append(_mark_low_confidence({"id": "bullet_missing", "missed": bullet_missed}, low_alignment_confidence))
-    elif content_issue_allowed and text_missed and not title_missed:
-        issues.append(_mark_low_confidence({"id": "content_gap", "missed": text_missed}, low_alignment_confidence))
+    elif content_issue_allowed and text_missed_for_content and not title_missed and not suppress_content_issues:
+        issues.append(_mark_low_confidence({"id": "content_gap", "missed": text_missed_for_content}, low_alignment_confidence))
     actionable_visual_missed = [item for item in visual_missed if not _is_generic_visual_miss(item)]
-    if actionable_visual_missed:
+    if actionable_visual_missed and not suppress_content_issues:
         issues.append(
             _mark_low_confidence(
                 {"id": "visual_not_explained", "visual_missed": actionable_visual_missed},
@@ -255,6 +331,7 @@ def generate_report(
     attitude_config: Dict | None = None,
     report_config: Dict | None = None,
     transcript_segments: Sequence[Dict] | None = None,
+    slide_roles: Dict[int, SlideRole] | None = None,
 ) -> SpeechReport:
     templates = _load_templates(Path(template_path))
     issue_templates = templates.get("issue_templates", [])
@@ -266,6 +343,7 @@ def generate_report(
 
     ae_map = {item.slide_id: item for item in ae_results}
     ce_map = {item.slide_id: item for item in ce_results}
+    role_map = slide_roles or {}
 
     per_slide: List[Dict] = []
     highlights: List[Dict] = []
@@ -277,7 +355,8 @@ def generate_report(
     for slide_id in sorted(set(list(ae_map.keys()) + list(ce_map.keys()))):
         ce = ce_map.get(slide_id)
         ae = ae_map.get(slide_id)
-        issues = _issue_from_slide(ce, ae, config=report_scoring_cfg, alignment=alignment)
+        slide_role = role_map.get(slide_id)
+        issues = _issue_from_slide(ce, ae, config=report_scoring_cfg, alignment=alignment, slide_role=slide_role)
         issue_ids = [issue["id"] for issue in issues]
         severity = _severity_score(issues)
 
@@ -309,6 +388,10 @@ def generate_report(
         per_slide.append(
             {
                 "slide_id": slide_id,
+                "slide_role": slide_role.role if slide_role else "content",
+                "slide_role_source": slide_role.source if slide_role else "default",
+                "slide_role_reason": slide_role.reason if slide_role else "no_role_metadata",
+                "coverage_weight": _coverage_weight(slide_id, role_map, report_scoring_cfg),
                 "coverage": ce.coverage if ce else None,
                 "semantic_coverage": ce.semantic_coverage if ce else None,
                 "soft_keypoint_coverage": ce.soft_keypoint_coverage if ce else None,
@@ -338,7 +421,9 @@ def generate_report(
     highlights = sorted(highlights, key=lambda item: item["severity"], reverse=True)
 
     overall_scores = {
-        "content_coverage": round(_coverage_score(ce_results), 2),
+        "content_coverage": round(_coverage_score(ce_results, role_map, report_scoring_cfg), 2),
+        "content_coverage_all": round(_coverage_score_all(ce_results), 2),
+        "content_scored_slide_count": _coverage_scored_slide_count(ce_results, role_map, report_scoring_cfg),
         "delivery_stability": round(_delivery_stability(ae_results), 2),
         "pacing_score": round(_pacing_score(ae_results), 2),
     }
@@ -354,6 +439,8 @@ def generate_report(
     global_summary = {
         "total_slides": len(per_slide),
         "avg_coverage": overall_scores["content_coverage"],
+        "avg_coverage_all": overall_scores["content_coverage_all"],
+        "content_scored_slide_count": overall_scores["content_scored_slide_count"],
         "mean_speech_rate": float(np.mean(all_rates)) if all_rates else None,
         "mean_silence_ratio": float(np.mean(all_silence)) if all_silence else None,
         "total_change_points": int(total_change_points),

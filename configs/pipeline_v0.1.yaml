@@ -154,6 +154,11 @@ report:
     ce_issue_semantic_threshold: 0.50
     ce_issue_keypoint_threshold: 0.50
     low_alignment_confidence_threshold: 0.06
+    role_coverage_weights:
+      content: 1.0
+      cover: 0.0
+      section: 0.0
+      thanks: 0.0
   llm:
     enabled: false
     model: gpt-4.1-mini

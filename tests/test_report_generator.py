@@ -3,6 +3,7 @@ from pathlib import Path
 from speechpt.attitude.attitude_scorer import SegmentAttitude
 from speechpt.attitude.change_point_detector import ChangePoint
 from speechpt.coherence.coherence_scorer import SlideCoherenceResult
+from speechpt.coherence.slide_role_classifier import SlideRole
 from speechpt.report.report_generator import generate_report
 
 
@@ -19,10 +20,10 @@ def test_generate_report_has_expected_sections():
         SlideCoherenceResult(
             slide_id=2,
             coverage=0.5,
-            missed_keypoints=["결론", "VISUAL: 매출 차트"],
+            missed_keypoints=["Alpha 제어 핵심", "VISUAL: 매출 차트"],
             evidence_spans=[],
             source_coverage={"title": 0.0, "visual": 0.0},
-            source_missed_keypoints={"title": ["결론"], "visual": ["VISUAL: 매출 차트"]},
+            source_missed_keypoints={"title": ["Alpha 제어 핵심"], "visual": ["VISUAL: 매출 차트"]},
             semantic_coverage=0.2,
             keypoint_coverage=0.2,
         ),
@@ -152,10 +153,10 @@ def test_generate_report_softens_ce_feedback_when_alignment_confidence_is_low():
         SlideCoherenceResult(
             slide_id=1,
             coverage=0.2,
-            missed_keypoints=["핵심 주제"],
+            missed_keypoints=["Alpha 핵심 주제"],
             evidence_spans=[],
             source_coverage={"title": 0.0},
-            source_missed_keypoints={"title": ["핵심 주제"]},
+            source_missed_keypoints={"title": ["Alpha 핵심 주제"]},
             keypoint_coverage=0.2,
         )
     ]
@@ -219,3 +220,102 @@ def test_generate_report_ignores_generic_visual_miss():
     )
 
     assert report.to_dict()["highlight_sections"] == []
+
+
+def test_generate_report_suppresses_title_issue_for_non_content_slide_role():
+    ce_results = [
+        SlideCoherenceResult(
+            slide_id=1,
+            coverage=0.1,
+            missed_keypoints=["표지 제목"],
+            evidence_spans=[],
+            source_coverage={"title": 0.0},
+            source_missed_keypoints={"title": ["표지 제목"]},
+            semantic_coverage=0.1,
+            keypoint_coverage=0.1,
+        ),
+        SlideCoherenceResult(
+            slide_id=2,
+            coverage=0.1,
+            missed_keypoints=["Alpha 내용 제목"],
+            evidence_spans=[],
+            source_coverage={"title": 0.0},
+            source_missed_keypoints={"title": ["Alpha 내용 제목"]},
+            semantic_coverage=0.1,
+            keypoint_coverage=0.1,
+        ),
+    ]
+
+    report = generate_report(
+        ce_results=ce_results,
+        ae_results=[],
+        template_path=Path("speechpt/report/templates/feedback_ko.yaml"),
+        slide_roles={
+            1: SlideRole(
+                slide_id=1,
+                role="cover",
+                source="test",
+                reason="cover",
+                coverage_weight=0.0,
+                suppress_title_missing=True,
+                suppress_content_issues=True,
+            ),
+            2: SlideRole(slide_id=2, role="content", source="test", reason="content"),
+        },
+    )
+
+    payload = report.to_dict()
+    highlights = {item["slide_id"]: item for item in payload["highlight_sections"]}
+    assert 1 not in highlights
+    assert "title_missing" in highlights[2]["issues"]
+    assert payload["per_slide_detail"][0]["slide_role"] == "cover"
+    assert payload["per_slide_detail"][0]["coverage_weight"] == 0.0
+
+
+def test_generate_report_suppresses_generic_title_missing():
+    ce_results = [
+        SlideCoherenceResult(
+            slide_id=1,
+            coverage=0.1,
+            missed_keypoints=["실험 결과"],
+            evidence_spans=[],
+            source_coverage={"title": 0.0},
+            source_missed_keypoints={"title": ["실험 결과"]},
+            semantic_coverage=0.1,
+            keypoint_coverage=0.1,
+        )
+    ]
+
+    report = generate_report(
+        ce_results=ce_results,
+        ae_results=[],
+        template_path=Path("speechpt/report/templates/feedback_ko.yaml"),
+    )
+
+    assert report.to_dict()["highlight_sections"] == []
+
+
+def test_generate_report_exposes_content_and_all_coverage():
+    ce_results = [
+        SlideCoherenceResult(slide_id=1, coverage=0.1, missed_keypoints=[], evidence_spans=[]),
+        SlideCoherenceResult(slide_id=2, coverage=0.7, missed_keypoints=[], evidence_spans=[]),
+        SlideCoherenceResult(slide_id=3, coverage=0.2, missed_keypoints=[], evidence_spans=[]),
+    ]
+
+    report = generate_report(
+        ce_results=ce_results,
+        ae_results=[],
+        template_path=Path("speechpt/report/templates/feedback_ko.yaml"),
+        slide_roles={
+            1: SlideRole(slide_id=1, role="cover", source="test", reason="cover", coverage_weight=0.0),
+            2: SlideRole(slide_id=2, role="content", source="test", reason="content", coverage_weight=1.0),
+            3: SlideRole(slide_id=3, role="thanks", source="test", reason="thanks", coverage_weight=0.0),
+        },
+    )
+
+    payload = report.to_dict()
+    assert payload["overall_scores"]["content_coverage"] == 70.0
+    assert payload["overall_scores"]["content_coverage_all"] == 33.33
+    assert payload["overall_scores"]["content_scored_slide_count"] == 1
+    assert payload["global_summary"]["avg_coverage"] == 70.0
+    assert payload["global_summary"]["avg_coverage_all"] == 33.33
