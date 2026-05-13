@@ -366,6 +366,26 @@ python -m speechpt.pipeline \
 }
 ```
 
+### 리포트 calibration snapshot 생성
+
+E2E 결과 리포트에서 점수/이슈/정렬 confidence만 뽑아 가벼운 회귀 비교용 JSON을 만든다. 원본 오디오나 전체 transcript는 저장하지 않는다.
+
+```bash
+python -m speechpt.report.snapshot \
+  --report /path/to/report.json \
+  --case controlv_large \
+  --out /path/to/controlv_snapshot.json
+```
+
+이전 snapshot과 비교:
+```bash
+python -m speechpt.report.snapshot \
+  --report /path/to/report.json \
+  --case controlv_large \
+  --baseline /path/to/previous_snapshot.json \
+  --out /path/to/current_snapshot.json
+```
+
 ---
 
 ## Filler Word Detection (간투사 탐지)

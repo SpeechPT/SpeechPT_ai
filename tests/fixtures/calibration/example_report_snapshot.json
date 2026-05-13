@@ -1,0 +1,77 @@
+{
+  "schema_version": "report_calibration_snapshot_v1",
+  "case": "example_calibration",
+  "overall_scores": {
+    "content_coverage": 28.11,
+    "content_coverage_all": 24.98,
+    "delivery_stability": 74.0,
+    "pacing_score": 91.93
+  },
+  "alignment": {
+    "mode": "hybrid",
+    "strategy_used": "auto_without_manual_override",
+    "confidence": 0.0517,
+    "warning_count": 1,
+    "warnings": ["low_confidence"],
+    "boundary_count": 3,
+    "boundaries": [0.0, 10.77, 22.27]
+  },
+  "issues": {
+    "total": 4,
+    "by_issue": {
+      "content_gap": 1,
+      "pitch_shift": 1,
+      "title_missing": 1,
+      "visual_not_explained": 1
+    },
+    "ce_total": 3,
+    "ce_by_issue": {
+      "content_gap": 1,
+      "title_missing": 1,
+      "visual_not_explained": 1
+    },
+    "ce_high_section_count": 1,
+    "feedback_by_severity": {
+      "low": 2,
+      "medium": 2
+    },
+    "low_confidence_feedback_count": 1
+  },
+  "slides": {
+    "total": 3,
+    "roles": {
+      "content": 1,
+      "cover": 1,
+      "thanks": 1
+    },
+    "coverage_min": 0.08,
+    "coverage_max": 0.42,
+    "content_slide_count": 1,
+    "per_slide": [
+      {
+        "slide_id": 1,
+        "role": "cover",
+        "coverage_weight": 0.0,
+        "coverage": 0.2,
+        "semantic_coverage": 0.15,
+        "keypoint_coverage": 0.0
+      },
+      {
+        "slide_id": 2,
+        "role": "content",
+        "coverage_weight": 1.0,
+        "coverage": 0.42,
+        "semantic_coverage": 0.49,
+        "keypoint_coverage": 0.16
+      },
+      {
+        "slide_id": 3,
+        "role": "thanks",
+        "coverage_weight": 0.0,
+        "coverage": 0.08,
+        "semantic_coverage": 0.03,
+        "keypoint_coverage": 0.0
+      }
+    ]
+  }
+}
