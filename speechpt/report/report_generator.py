@@ -15,6 +15,7 @@ import yaml
 from speechpt.attitude.attitude_scorer import SegmentAttitude
 from speechpt.coherence.coherence_scorer import SlideCoherenceResult
 from speechpt.coherence.slide_role_classifier import SlideRole
+from speechpt.report.score_mapping import map_coverage_score
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -550,9 +551,14 @@ def generate_report(
 
     highlights = sorted(highlights, key=lambda item: item["severity"], reverse=True)
 
+    coverage_pct = _coverage_score(ce_results, role_map, report_scoring_cfg)
+    coverage_pct_all = _coverage_score_all(ce_results)
+    mapping_cfg = report_scoring_cfg.get("content_coverage_user_mapping")
     overall_scores = {
-        "content_coverage": round(_coverage_score(ce_results, role_map, report_scoring_cfg), 2),
-        "content_coverage_all": round(_coverage_score_all(ce_results), 2),
+        "content_coverage": round(coverage_pct, 2),
+        "content_coverage_all": round(coverage_pct_all, 2),
+        "content_coverage_user": round(map_coverage_score(coverage_pct, mapping_cfg), 2),
+        "content_coverage_user_all": round(map_coverage_score(coverage_pct_all, mapping_cfg), 2),
         "content_scored_slide_count": _coverage_scored_slide_count(ce_results, role_map, report_scoring_cfg),
         "delivery_stability": round(_delivery_stability(ae_results, report_scoring_cfg), 2),
         "pacing_score": round(_pacing_score(ae_results), 2),
@@ -570,6 +576,8 @@ def generate_report(
         "total_slides": len(per_slide),
         "avg_coverage": overall_scores["content_coverage"],
         "avg_coverage_all": overall_scores["content_coverage_all"],
+        "avg_coverage_user": overall_scores["content_coverage_user"],
+        "avg_coverage_user_all": overall_scores["content_coverage_user_all"],
         "content_scored_slide_count": overall_scores["content_scored_slide_count"],
         "mean_speech_rate": float(np.mean(all_rates)) if all_rates else None,
         "mean_silence_ratio": float(np.mean(all_silence)) if all_silence else None,

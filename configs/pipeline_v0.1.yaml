@@ -182,6 +182,13 @@ report:
       cover: 0.0
       section: 0.0
       thanks: 0.0
+    content_coverage_user_mapping:
+      - {raw: 0.00, score: 0}
+      - {raw: 0.15, score: 40}
+      - {raw: 0.30, score: 65}
+      - {raw: 0.50, score: 82}
+      - {raw: 0.70, score: 95}
+      - {raw: 1.00, score: 100}
   llm:
     enabled: false
     model: gpt-4.1-mini
