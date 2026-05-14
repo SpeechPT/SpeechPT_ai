@@ -81,7 +81,7 @@ def test_generate_report_has_expected_sections():
     assert "VISUAL: 매출 차트" in slide2["source_missed"]["visual"]
     highlight2 = [x for x in payload["highlight_sections"] if x["slide_id"] == 2][0]
     assert "title_missing" in highlight2["issues"]
-    assert any("핵심 제목/주제" in item["text"] for item in highlight2["feedback"])
+    assert any("주제" in item["text"] for item in highlight2["feedback"])
 
 
 def test_generate_report_adds_dwell_feedback():
@@ -142,10 +142,74 @@ def test_generate_report_adds_dwell_feedback():
     slide2 = [x for x in payload["highlight_sections"] if x["slide_id"] == 2][0]
     assert "dwell_short" in slide1["issues"]
     assert "dwell_long" in slide2["issues"]
-    assert any("발표 전체의 10.0%" in item["text"] for item in slide1["feedback"])
+    assert any("발표 시간의 10.0%" in item["text"] for item in slide1["feedback"])
     detail1 = [x for x in payload["per_slide_detail"] if x["slide_id"] == 1][0]
     assert detail1["dwell_sec"] == 5.0
     assert detail1["dwell_ratio"] == 0.1
+
+
+def test_generate_report_limits_pitch_shift_to_top_fraction():
+    ce_results = [SlideCoherenceResult(slide_id=i, coverage=0.9, missed_keypoints=[], evidence_spans=[]) for i in range(1, 5)]
+    ae_results = [
+        SegmentAttitude(
+            slide_id=i,
+            start_sec=float(i * 10),
+            end_sec=float(i * 10 + 10),
+            features={"avg_speech_rate": 3.0, "silence_ratio": 0.0, "filler_count": 0},
+            change_points=[ChangePoint(time_sec=float(i * 10 + 1), type="pitch_shift", magnitude=float(i))],
+            trend_label="stable",
+            anomaly_flags=[],
+            fillers=[],
+        )
+        for i in range(1, 5)
+    ]
+
+    report = generate_report(
+        ce_results=ce_results,
+        ae_results=ae_results,
+        template_path=Path("speechpt/report/templates/feedback_ko.yaml"),
+        attitude_config={"scoring": {"pitch_issue_max_fraction": 0.25}},
+    )
+
+    highlights = report.to_dict()["highlight_sections"]
+    pitch_slides = [item["slide_id"] for item in highlights if "pitch_shift" in item["issues"]]
+    assert pitch_slides == [4]
+
+
+def test_generate_report_exposes_only_public_ae_probe_fields():
+    ce_results = [SlideCoherenceResult(slide_id=1, coverage=0.9, missed_keypoints=[], evidence_spans=[])]
+    ae_results = [
+        SegmentAttitude(
+            slide_id=1,
+            start_sec=0.0,
+            end_sec=10.0,
+            features={
+                "avg_speech_rate": 3.0,
+                "silence_ratio": 0.0,
+                "filler_count": 0,
+                "ae_probe_overall_delivery": 0.8,
+                "ae_probe_speech_rate": 1.5,
+                "ae_probe_silence_ratio": 0.1,
+                "ae_probe_pitch_shift_prob": 0.001,
+                "ae_probe_energy_drop_prob": 0.0001,
+            },
+            change_points=[],
+            trend_label="stable",
+            anomaly_flags=[],
+            fillers=[],
+        )
+    ]
+
+    report = generate_report(
+        ce_results=ce_results,
+        ae_results=ae_results,
+        template_path=Path("speechpt/report/templates/feedback_ko.yaml"),
+    )
+
+    ae_probe = report.to_dict()["per_slide_detail"][0]["ae_probe"]
+    assert ae_probe["ae_probe_overall_delivery"] == 0.8
+    assert "ae_probe_pitch_shift_prob" not in ae_probe
+    assert "ae_probe_energy_drop_prob" not in ae_probe
 
 
 def test_generate_report_delivery_stability_uses_measured_features_before_probe():
@@ -235,7 +299,7 @@ def test_generate_report_softens_ce_feedback_when_alignment_confidence_is_low():
     payload = report.to_dict()
     feedback = payload["highlight_sections"][0]["feedback"][0]
     assert feedback["severity"] == "low"
-    assert "자동 매칭" in feedback["text"]
+    assert "분석상 약하게" in feedback["text"]
 
 
 def test_generate_report_does_not_create_ce_issue_for_semantic_paraphrase_match():

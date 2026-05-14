@@ -181,6 +181,45 @@ def _prediction_from_tensor(pred: torch.Tensor, segment: Dict) -> AEProbePredict
     )
 
 
+def _segment_chunks(
+    start_sec: float,
+    end_sec: float,
+    *,
+    chunk_duration_sec: float,
+    min_chunk_duration_sec: float,
+) -> list[tuple[float, float]]:
+    if end_sec <= start_sec:
+        return []
+    if chunk_duration_sec <= 0 or end_sec - start_sec <= chunk_duration_sec:
+        return [(start_sec, end_sec)]
+
+    chunks: list[tuple[float, float]] = []
+    cursor = start_sec
+    while cursor < end_sec:
+        chunk_end = min(end_sec, cursor + chunk_duration_sec)
+        if chunks and chunk_end - cursor < min_chunk_duration_sec:
+            prev_start, _ = chunks[-1]
+            chunks[-1] = (prev_start, end_sec)
+            break
+        chunks.append((cursor, chunk_end))
+        cursor = chunk_end
+    return chunks
+
+
+def _chunk_embedding(
+    chunk_wav: torch.Tensor,
+    *,
+    processor: Wav2Vec2Processor,
+    backbone: Wav2Vec2Model,
+    sample_rate: int,
+    device: torch.device,
+) -> torch.Tensor:
+    chunk_array = chunk_wav.cpu().numpy()
+    inputs = processor([chunk_array], sampling_rate=sample_rate, return_tensors="pt", padding=True).to(device)
+    hidden = backbone(**inputs).last_hidden_state
+    return hidden.mean(dim=1)[0].detach()
+
+
 def predict_segments(audio_path: str | Path, segments: Sequence[Dict], config: Dict) -> list[AEProbePrediction]:
     """Run the trained AE probe over slide-level segments.
 
@@ -192,6 +231,8 @@ def predict_segments(audio_path: str | Path, segments: Sequence[Dict], config: D
     probe_path = resolve_probe_path(config)
     hf_model = str(config.get("hf_model", config.get("model_name", "kresnik/wav2vec2-large-xlsr-korean")))
     sample_rate = int(config.get("sample_rate", 16000))
+    chunk_duration_sec = float(config.get("chunk_duration_sec", 25.0))
+    min_chunk_duration_sec = float(config.get("min_chunk_duration_sec", 1.0))
     device_name = str(config.get("device", "auto"))
     if device_name == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -210,27 +251,44 @@ def predict_segments(audio_path: str | Path, segments: Sequence[Dict], config: D
             "Use the same wav2vec2 backbone used during training."
         )
 
-    wav, _ = librosa.load(str(audio_path), sr=sample_rate)
+    wav_np, _ = librosa.load(str(audio_path), sr=sample_rate)
+    wav = torch.as_tensor(wav_np, dtype=torch.float32)
     duration_sec = len(wav) / sample_rate if sample_rate > 0 else 0.0
     if len(wav) == 0 or duration_sec <= 0.0:
         return []
 
-    with torch.no_grad():
-        inputs = processor([wav], sampling_rate=sample_rate, return_tensors="pt", padding=True).to(device)
-        hidden = backbone(**inputs).last_hidden_state
-
+    with torch.inference_mode():
         predictions: list[AEProbePrediction] = []
-        frame_count = hidden.shape[1]
         for segment in segments:
             start_sec = max(0.0, float(segment.get("start_sec", 0.0)))
             end_sec = min(duration_sec, float(segment.get("end_sec", duration_sec)))
             if end_sec <= start_sec:
                 continue
-            f_start = int((start_sec / duration_sec) * frame_count)
-            f_end = int((end_sec / duration_sec) * frame_count)
-            f_start = max(0, min(f_start, frame_count - 1))
-            f_end = max(f_start + 1, min(f_end, frame_count))
-            pooled = hidden[:, f_start:f_end, :].mean(dim=1)
+            segment_chunks = _segment_chunks(
+                start_sec,
+                end_sec,
+                chunk_duration_sec=chunk_duration_sec,
+                min_chunk_duration_sec=min_chunk_duration_sec,
+            )
+            weighted_sum = torch.zeros((expected_dim,), dtype=torch.float32, device=device)
+            total_weight = 0.0
+            for chunk_start, chunk_end in segment_chunks:
+                sample_start = max(0, min(int(chunk_start * sample_rate), len(wav) - 1))
+                sample_end = max(sample_start + 1, min(int(chunk_end * sample_rate), len(wav)))
+                chunk_wav = wav[sample_start:sample_end]
+                pooled_chunk = _chunk_embedding(
+                    chunk_wav,
+                    processor=processor,
+                    backbone=backbone,
+                    sample_rate=sample_rate,
+                    device=device,
+                )
+                weight = max(0.0, chunk_end - chunk_start)
+                weighted_sum += pooled_chunk * weight
+                total_weight += weight
+            if total_weight <= 0.0:
+                continue
+            pooled = (weighted_sum / total_weight).unsqueeze(0)
             pred = probe(pooled)[0]
             predictions.append(_prediction_from_tensor(pred, segment))
 

@@ -130,6 +130,8 @@ attitude:
     trend_slope_eps: 0.001
     dwell_short_z_threshold: -1.5
     dwell_long_z_threshold: 2.0
+    pitch_issue_max_fraction: 0.3
+    pitch_issue_min_score: 0.0
   wav2vec2:
     model_name: "facebook/wav2vec2-base"
     use_probe: false
@@ -140,6 +142,8 @@ attitude:
     model_dir: cache/ae_probe_lora
     hf_model: "kresnik/wav2vec2-large-xlsr-korean"
     sample_rate: 16000
+    chunk_duration_sec: 25
+    min_chunk_duration_sec: 1
     device: auto
     fail_open: false
 stt:

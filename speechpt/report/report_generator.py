@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import json
 import logging
 import re
@@ -48,6 +49,12 @@ ISSUE_WEIGHT = {
 }
 DEFAULT_TEMPLATE_TEXT = "슬라이드 {slide_id} 구간에 개선 포인트가 있습니다."
 CE_ISSUE_IDS = {"content_gap", "title_missing", "bullet_missing", "visual_not_explained"}
+CONTENT_ISSUE_IDS = CE_ISSUE_IDS
+PUBLIC_AE_PROBE_FIELDS = {
+    "ae_probe_speech_rate",
+    "ae_probe_silence_ratio",
+    "ae_probe_overall_delivery",
+}
 GENERIC_VISUAL_PATTERN = re.compile(
     r"^(chart_candidate|image|table|diagram|screenshot|bar_chart|line_chart|flowchart|none)(\s*x?\d+)?$",
     re.IGNORECASE,
@@ -341,12 +348,37 @@ def _mark_low_confidence(issue: Dict, low_confidence: bool) -> Dict:
     return issue
 
 
+def _pitch_change_score(ae: SegmentAttitude) -> float:
+    score = 0.0
+    for cp in ae.change_points:
+        if cp.type.startswith("pitch"):
+            score += abs(float(getattr(cp, "magnitude", 1.0) or 1.0))
+    return score
+
+
+def _pitch_issue_slide_ids(ae_results: Sequence[SegmentAttitude], scoring_cfg: Dict) -> set[int]:
+    scores = {ae.slide_id: _pitch_change_score(ae) for ae in ae_results}
+    scores = {slide_id: score for slide_id, score in scores.items() if score > 0}
+    if not scores:
+        return set()
+    max_fraction = float(scoring_cfg.get("pitch_issue_max_fraction", 0.30))
+    max_count = max(1, math.ceil(len(ae_results) * max_fraction))
+    min_score = float(scoring_cfg.get("pitch_issue_min_score", 0.0))
+    ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    return {slide_id for slide_id, score in ranked[:max_count] if score > min_score}
+
+
+def _public_ae_probe_features(features: Dict) -> Dict:
+    return {key: value for key, value in features.items() if key in PUBLIC_AE_PROBE_FIELDS}
+
+
 def _issue_from_slide(
     ce: SlideCoherenceResult | None,
     ae: SegmentAttitude | None,
     config: Dict | None = None,
     alignment: Dict | None = None,
     slide_role: SlideRole | None = None,
+    pitch_issue_slide_ids: set[int] | None = None,
 ) -> List[Dict]:
     cfg = config or {}
     scoring_cfg = cfg.get("scoring", cfg)
@@ -396,7 +428,9 @@ def _issue_from_slide(
             issues.append({"id": "speed_rise", "rate_change": ae.trend_label})
         if ae.features.get("filler_count", 0) >= 3:
             issues.append({"id": "filler_many", "filler_count": ae.features.get("filler_count", 0)})
-        if any(cp.type.startswith("pitch") for cp in ae.change_points):
+        if any(cp.type.startswith("pitch") for cp in ae.change_points) and (
+            pitch_issue_slide_ids is None or ae.slide_id in pitch_issue_slide_ids
+        ):
             issues.append({"id": "pitch_shift"})
         dwell_z = float(ae.features.get("dwell_z", 0.0))
         dwell_ratio_pct = f"{float(ae.features.get('dwell_ratio', 0.0)) * 100:.1f}"
@@ -474,6 +508,7 @@ def generate_report(
     ae_map = {item.slide_id: item for item in ae_results}
     ce_map = {item.slide_id: item for item in ce_results}
     role_map = slide_roles or {}
+    pitch_issue_ids = _pitch_issue_slide_ids(ae_results, report_scoring_cfg)
 
     per_slide: List[Dict] = []
     highlights: List[Dict] = []
@@ -486,7 +521,14 @@ def generate_report(
         ce = ce_map.get(slide_id)
         ae = ae_map.get(slide_id)
         slide_role = role_map.get(slide_id)
-        issues = _issue_from_slide(ce, ae, config=report_scoring_cfg, alignment=alignment, slide_role=slide_role)
+        issues = _issue_from_slide(
+            ce,
+            ae,
+            config=report_scoring_cfg,
+            alignment=alignment,
+            slide_role=slide_role,
+            pitch_issue_slide_ids=pitch_issue_ids,
+        )
         issue_ids = [issue["id"] for issue in issues]
         severity = _severity_score(issues)
 
@@ -538,11 +580,7 @@ def generate_report(
                 "word_count": ae.features.get("word_count", None) if ae else None,
                 "words_per_sec": ae.features.get("words_per_sec", None) if ae else None,
                 "delivery_stability": round(_delivery_stability([ae], report_scoring_cfg), 2) if ae else None,
-                "ae_probe": {
-                    key: value
-                    for key, value in (ae.features.items() if ae else [])
-                    if key.startswith("ae_probe_")
-                },
+                "ae_probe": _public_ae_probe_features(ae.features) if ae else {},
                 "trend": ae.trend_label if ae else None,
                 "change_points": [cp.time_sec for cp in (ae.change_points if ae else [])],
                 "anomalies": ae.anomaly_flags if ae else [],

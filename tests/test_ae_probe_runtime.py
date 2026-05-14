@@ -4,7 +4,12 @@ from pathlib import Path
 import pytest
 import torch
 
-from speechpt.attitude.ae_probe_runtime import ARTIFACT_URI_MARKER, AEProbePrediction, resolve_probe_path
+from speechpt.attitude.ae_probe_runtime import (
+    ARTIFACT_URI_MARKER,
+    AEProbePrediction,
+    _segment_chunks,
+    resolve_probe_path,
+)
 
 
 def test_resolve_probe_path_extracts_from_local_tar(tmp_path: Path):
@@ -109,3 +114,25 @@ def test_ae_probe_prediction_uses_report_feature_prefix():
     assert features["ae_probe_speech_rate"] == 1.2
     assert features["ae_probe_pitch_shift"] == 1.0
     assert all(key.startswith("ae_probe_") for key in features)
+
+
+def test_segment_chunks_splits_long_probe_segments():
+    chunks = _segment_chunks(
+        0.0,
+        70.0,
+        chunk_duration_sec=25.0,
+        min_chunk_duration_sec=1.0,
+    )
+
+    assert chunks == [(0.0, 25.0), (25.0, 50.0), (50.0, 70.0)]
+
+
+def test_segment_chunks_merges_tiny_tail():
+    chunks = _segment_chunks(
+        0.0,
+        52.0,
+        chunk_duration_sec=25.0,
+        min_chunk_duration_sec=5.0,
+    )
+
+    assert chunks == [(0.0, 25.0), (25.0, 52.0)]

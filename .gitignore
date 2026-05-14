@@ -34,3 +34,11 @@ cache/
 
 # local model artifacts
 models/
+
+# personal notes / scratch
+claude.md
+.tmp_sagemaker_e2e/
+
+# large media (input fixtures stay out of git)
+tests/*.mp3
+tests/*.wav
