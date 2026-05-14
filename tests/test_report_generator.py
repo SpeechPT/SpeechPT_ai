@@ -148,33 +148,42 @@ def test_generate_report_adds_dwell_feedback():
     assert detail1["dwell_ratio"] == 0.1
 
 
-def test_generate_report_uses_ae_probe_overall_delivery_for_delivery_stability():
+def test_generate_report_delivery_stability_uses_measured_features_before_probe():
     ce_results = [SlideCoherenceResult(slide_id=1, coverage=0.9, missed_keypoints=[], evidence_spans=[])]
-    ae_results = [
+    good_ae = [
         SegmentAttitude(
             slide_id=1,
             start_sec=0.0,
             end_sec=10.0,
             features={
                 "avg_speech_rate": 3.0,
-                "silence_ratio": 0.0,
+                "words_per_sec": 3.0,
+                "silence_ratio": 0.15,
                 "filler_count": 0,
-                "ae_probe_overall_delivery": 0.64,
+                "word_count": 100,
+                "dwell_z": 0.0,
+                "ae_probe_overall_delivery": 1.0,
             },
             change_points=[],
             trend_label="stable",
             anomaly_flags=[],
             fillers=[],
         ),
+    ]
+    bad_ae = [
         SegmentAttitude(
-            slide_id=2,
-            start_sec=10.0,
-            end_sec=20.0,
+            slide_id=1,
+            start_sec=0.0,
+            end_sec=10.0,
             features={
-                "avg_speech_rate": 3.0,
-                "silence_ratio": 0.0,
-                "filler_count": 0,
-                "ae_probe_overall_delivery": 0.84,
+                "avg_speech_rate": 0.4,
+                "words_per_sec": 0.4,
+                "silence_ratio": 0.8,
+                "filler_count": 10,
+                "word_count": 100,
+                "dwell_z": 3.5,
+                # Probe가 만점이어도 실측 feature가 나쁘면 최종 점수를 지배하면 안 된다.
+                "ae_probe_overall_delivery": 1.0,
             },
             change_points=[],
             trend_label="stable",
@@ -183,13 +192,23 @@ def test_generate_report_uses_ae_probe_overall_delivery_for_delivery_stability()
         ),
     ]
 
-    report = generate_report(
+    good_report = generate_report(
         ce_results=ce_results,
-        ae_results=ae_results,
+        ae_results=good_ae,
+        template_path=Path("speechpt/report/templates/feedback_ko.yaml"),
+    )
+    bad_report = generate_report(
+        ce_results=ce_results,
+        ae_results=bad_ae,
         template_path=Path("speechpt/report/templates/feedback_ko.yaml"),
     )
 
-    assert report.to_dict()["overall_scores"]["delivery_stability"] == 74.0
+    good_payload = good_report.to_dict()
+    bad_payload = bad_report.to_dict()
+    assert good_payload["overall_scores"]["delivery_stability"] > 90.0
+    assert bad_payload["overall_scores"]["delivery_stability"] < 25.0
+    assert good_payload["overall_scores"]["delivery_stability"] > bad_payload["overall_scores"]["delivery_stability"] + 60.0
+    assert bad_payload["global_summary"]["delivery_stability_components"]["probe"] == 100.0
 
 
 def test_generate_report_softens_ce_feedback_when_alignment_confidence_is_low():

@@ -143,20 +143,141 @@ def _semantic_coverage(ce: SlideCoherenceResult | None) -> float:
     return float(value)
 
 
-def _delivery_stability(ae_results: Sequence[SegmentAttitude]) -> float:
+def _range_plateau_score(value: float, zero_min: float, full_min: float, full_max: float, zero_max: float) -> float:
+    if full_min <= value <= full_max:
+        return 1.0
+    if value < full_min:
+        if full_min <= zero_min:
+            return 0.0
+        return float(np.clip((value - zero_min) / (full_min - zero_min), 0.0, 1.0))
+    if zero_max <= full_max:
+        return 0.0
+    return float(np.clip((zero_max - value) / (zero_max - full_max), 0.0, 1.0))
+
+
+def _density_score(value: float, full_max: float, zero_at: float) -> float:
+    if value <= full_max:
+        return 1.0
+    if zero_at <= full_max:
+        return 0.0
+    return float(np.clip((zero_at - value) / (zero_at - full_max), 0.0, 1.0))
+
+
+def _delivery_stability_components(
+    ae_results: Sequence[SegmentAttitude],
+    scoring_cfg: Dict | None = None,
+) -> Dict[str, float]:
     if not ae_results:
-        return 50.0
+        return {}
+    cfg = (scoring_cfg or {}).get("delivery_stability", {})
+    silence_cfg = cfg.get("silence", {})
+    rate_cfg = cfg.get("speech_rate", {})
+    filler_cfg = cfg.get("filler", {})
+    dwell_cfg = cfg.get("dwell", {})
+
+    silence_scores = [
+        _range_plateau_score(
+            float(seg.features.get("silence_ratio", 0.0)),
+            float(silence_cfg.get("zero_min", 0.0)),
+            float(silence_cfg.get("full_min", 0.05)),
+            float(silence_cfg.get("full_max", 0.40)),
+            float(silence_cfg.get("zero_max", 0.70)),
+        )
+        for seg in ae_results
+        if seg.features
+    ]
+    rate_scores = []
+    for seg in ae_results:
+        if not seg.features:
+            continue
+        rate = seg.features.get("words_per_sec", seg.features.get("avg_speech_rate", 0.0))
+        rate_scores.append(
+            _range_plateau_score(
+                float(rate),
+                float(rate_cfg.get("zero_min", 0.5)),
+                float(rate_cfg.get("full_min", 2.0)),
+                float(rate_cfg.get("full_max", 5.0)),
+                float(rate_cfg.get("zero_max", 7.0)),
+            )
+        )
+
+    filler_scores = []
+    for seg in ae_results:
+        if not seg.features:
+            continue
+        word_count = float(seg.features.get("word_count", 0.0))
+        if word_count <= 0:
+            filler_scores.append(1.0)
+            continue
+        density = float(seg.features.get("filler_count", 0.0)) / max(word_count, 1.0)
+        filler_scores.append(
+            _density_score(
+                density,
+                float(filler_cfg.get("full_max", 0.02)),
+                float(filler_cfg.get("zero_at", 0.05)),
+            )
+        )
+
+    dwell_scores = [
+        _density_score(
+            abs(float(seg.features.get("dwell_z", 0.0))),
+            float(dwell_cfg.get("full_abs_z", 1.5)),
+            float(dwell_cfg.get("zero_abs_z", 3.0)),
+        )
+        for seg in ae_results
+        if seg.features
+    ]
     probe_scores = [
         float(seg.features["ae_probe_overall_delivery"])
         for seg in ae_results
         if seg.features and "ae_probe_overall_delivery" in seg.features
     ]
+    anomaly_scores = [
+        1.0 - min(1.0, len(seg.anomaly_flags) / 3.0)
+        for seg in ae_results
+    ]
+
+    components: Dict[str, float] = {}
+    if silence_scores:
+        components["silence"] = float(np.mean(silence_scores))
+    if rate_scores:
+        components["speech_rate"] = float(np.mean(rate_scores))
+    if filler_scores:
+        components["filler"] = float(np.mean(filler_scores))
+    if dwell_scores:
+        components["dwell"] = float(np.mean(dwell_scores))
     if probe_scores:
-        mean_probe_score = float(np.mean(probe_scores))
-        return float(max(0.0, min(100.0, mean_probe_score * 100.0)))
-    total_anomalies = sum(len(seg.anomaly_flags) for seg in ae_results)
-    denom = len(ae_results) * 3 + 1e-8
-    return float(max(0.0, 100.0 * (1.0 - min(1.0, total_anomalies / denom))))
+        components["probe"] = float(np.mean(probe_scores))
+    if anomaly_scores:
+        components["anomaly_fallback"] = float(np.mean(anomaly_scores))
+    return components
+
+
+def _delivery_stability(ae_results: Sequence[SegmentAttitude], scoring_cfg: Dict | None = None) -> float:
+    if not ae_results:
+        return 50.0
+    cfg = (scoring_cfg or {}).get("delivery_stability", {})
+    weights = {
+        "silence": float(cfg.get("silence_weight", 0.35)),
+        "speech_rate": float(cfg.get("speech_rate_weight", 0.25)),
+        "filler": float(cfg.get("filler_weight", 0.15)),
+        "dwell": float(cfg.get("dwell_weight", 0.10)),
+        "probe": float(cfg.get("probe_weight", 0.15)),
+    }
+    components = _delivery_stability_components(ae_results, scoring_cfg)
+    weighted_sum = 0.0
+    weight_sum = 0.0
+    for key, weight in weights.items():
+        if weight <= 0 or key not in components:
+            continue
+        weighted_sum += components[key] * weight
+        weight_sum += weight
+
+    if weight_sum <= 0 and "anomaly_fallback" in components:
+        return float(max(0.0, min(100.0, components["anomaly_fallback"] * 100.0)))
+    if weight_sum <= 0:
+        return 50.0
+    return float(max(0.0, min(100.0, (weighted_sum / weight_sum) * 100.0)))
 
 
 def _pacing_score(ae_results: Sequence[SegmentAttitude]) -> float:
@@ -415,6 +536,7 @@ def generate_report(
                 "dwell_z": ae.features.get("dwell_z", None) if ae else None,
                 "word_count": ae.features.get("word_count", None) if ae else None,
                 "words_per_sec": ae.features.get("words_per_sec", None) if ae else None,
+                "delivery_stability": round(_delivery_stability([ae], report_scoring_cfg), 2) if ae else None,
                 "ae_probe": {
                     key: value
                     for key, value in (ae.features.items() if ae else [])
@@ -432,7 +554,7 @@ def generate_report(
         "content_coverage": round(_coverage_score(ce_results, role_map, report_scoring_cfg), 2),
         "content_coverage_all": round(_coverage_score_all(ce_results), 2),
         "content_scored_slide_count": _coverage_scored_slide_count(ce_results, role_map, report_scoring_cfg),
-        "delivery_stability": round(_delivery_stability(ae_results), 2),
+        "delivery_stability": round(_delivery_stability(ae_results, report_scoring_cfg), 2),
         "pacing_score": round(_pacing_score(ae_results), 2),
     }
 
@@ -452,6 +574,11 @@ def generate_report(
         "mean_speech_rate": float(np.mean(all_rates)) if all_rates else None,
         "mean_silence_ratio": float(np.mean(all_silence)) if all_silence else None,
         "total_change_points": int(total_change_points),
+        "delivery_stability_components": {
+            key: round(value * 100.0, 2)
+            for key, value in _delivery_stability_components(ae_results, report_scoring_cfg).items()
+            if key != "anomaly_fallback"
+        },
         "summary_text": summary_template.get("text", ""),
     }
 

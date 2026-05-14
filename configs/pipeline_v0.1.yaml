@@ -1,4 +1,4 @@
-version: 0.3.0
+version: 0.4.0
 coherence:
   model_name: jhgan/ko-sroberta-multitask
   threshold: 0.55
@@ -155,6 +155,28 @@ report:
     ce_issue_semantic_threshold: 0.50
     ce_issue_keypoint_threshold: 0.50
     low_alignment_confidence_threshold: 0.06
+    delivery_stability:
+      silence_weight: 0.35
+      speech_rate_weight: 0.25
+      filler_weight: 0.15
+      dwell_weight: 0.10
+      probe_weight: 0.15
+      silence:
+        zero_min: 0.0
+        full_min: 0.05
+        full_max: 0.40
+        zero_max: 0.70
+      speech_rate:
+        zero_min: 0.5
+        full_min: 2.0
+        full_max: 5.0
+        zero_max: 7.0
+      filler:
+        full_max: 0.02
+        zero_at: 0.05
+      dwell:
+        full_abs_z: 1.5
+        zero_abs_z: 3.0
     role_coverage_weights:
       content: 1.0
       cover: 0.0
