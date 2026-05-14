@@ -5,15 +5,18 @@ import logging
 import tarfile
 from dataclasses import dataclass
 from pathlib import Path
+from posixpath import normpath
 from typing import Dict, Sequence
 
 import librosa
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from peft import PeftModel
 from transformers import Wav2Vec2Model, Wav2Vec2Processor
 
 logger = logging.getLogger(__name__)
+ARTIFACT_URI_MARKER = ".model_artifact_s3"
 
 
 @dataclass(frozen=True)
@@ -64,17 +67,42 @@ def _parse_s3_uri(uri: str) -> tuple[str, str]:
     return bucket, key
 
 
+def _is_allowed_artifact_member(name: str) -> bool:
+    normalized = normpath(name)
+    if normalized.startswith("../") or normalized.startswith("/") or normalized == ".":
+        return False
+    return normalized in {"ae_probe.pt", "meta.pt"} or normalized.startswith("lora_adapter/")
+
+
+def _clear_model_files(model_dir: Path) -> None:
+    for path in [model_dir / "ae_probe.pt", model_dir / "meta.pt", model_dir / "model.tar.gz"]:
+        if path.exists():
+            path.unlink()
+    lora_dir = model_dir / "lora_adapter"
+    if lora_dir.exists():
+        import shutil
+
+        shutil.rmtree(lora_dir)
+
+
 def _extract_probe_from_tar(tar_path: Path, model_dir: Path) -> Path:
     probe_path = model_dir / "ae_probe.pt"
+    extracted_probe = False
     with tarfile.open(tar_path, "r:gz") as tf:
-        try:
-            member = tf.getmember("ae_probe.pt")
-        except KeyError as exc:
-            raise FileNotFoundError(f"ae_probe.pt not found in {tar_path}") from exc
-        source = tf.extractfile(member)
-        if source is None:
-            raise FileNotFoundError(f"ae_probe.pt could not be read from {tar_path}")
-        probe_path.write_bytes(source.read())
+        for member in tf.getmembers():
+            if not member.isfile() or not _is_allowed_artifact_member(member.name):
+                continue
+            normalized = normpath(member.name)
+            source = tf.extractfile(member)
+            if source is None:
+                continue
+            target = model_dir / normalized
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(source.read())
+            if normalized == "ae_probe.pt":
+                extracted_probe = True
+    if not extracted_probe:
+        raise FileNotFoundError(f"ae_probe.pt not found in {tar_path}")
     return probe_path
 
 
@@ -83,24 +111,43 @@ def resolve_probe_path(config: Dict) -> Path:
     model_dir.mkdir(parents=True, exist_ok=True)
 
     probe_path = model_dir / "ae_probe.pt"
-    if probe_path.exists():
+    artifact_s3 = config.get("model_artifact_s3")
+    marker_path = model_dir / ARTIFACT_URI_MARKER
+    if probe_path.exists() and not artifact_s3:
+        return probe_path
+    if probe_path.exists() and artifact_s3 and marker_path.exists() and marker_path.read_text().strip() == str(artifact_s3):
         return probe_path
 
     tar_path = model_dir / "model.tar.gz"
-    if tar_path.exists():
+    if tar_path.exists() and not artifact_s3:
         return _extract_probe_from_tar(tar_path, model_dir)
 
-    artifact_s3 = config.get("model_artifact_s3")
     if artifact_s3:
         import boto3
 
+        _clear_model_files(model_dir)
         bucket, key = _parse_s3_uri(str(artifact_s3))
         profile = config.get("aws_profile")
         session = boto3.Session(profile_name=str(profile)) if profile else boto3.Session()
         session.client("s3").download_file(bucket, key, str(tar_path))
-        return _extract_probe_from_tar(tar_path, model_dir)
+        extracted = _extract_probe_from_tar(tar_path, model_dir)
+        marker_path.write_text(str(artifact_s3), encoding="utf-8")
+        return extracted
 
     raise FileNotFoundError(f"{probe_path} not found and no model_artifact_s3 provided")
+
+
+def _load_backbone(hf_model: str, model_dir: Path, device: torch.device) -> Wav2Vec2Model:
+    backbone = Wav2Vec2Model.from_pretrained(hf_model).to(device)
+    lora_dir = model_dir / "lora_adapter"
+    if lora_dir.exists() and (lora_dir / "adapter_config.json").exists():
+        backbone = PeftModel.from_pretrained(backbone, str(lora_dir))
+        backbone = backbone.merge_and_unload()
+        logger.info("Loaded AE LoRA adapter from %s", lora_dir)
+    backbone.eval()
+    for param in backbone.parameters():
+        param.requires_grad = False
+    return backbone
 
 
 def _load_probe(probe_path: Path, device: torch.device) -> _AEProbe:
@@ -152,10 +199,7 @@ def predict_segments(audio_path: str | Path, segments: Sequence[Dict], config: D
         device = torch.device(device_name)
 
     processor = Wav2Vec2Processor.from_pretrained(hf_model)
-    backbone = Wav2Vec2Model.from_pretrained(hf_model).to(device)
-    backbone.eval()
-    for param in backbone.parameters():
-        param.requires_grad = False
+    backbone = _load_backbone(hf_model, probe_path.parent, device)
 
     probe = _load_probe(probe_path, device)
     expected_dim = int(probe.fc1.in_features)
