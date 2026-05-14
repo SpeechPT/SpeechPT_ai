@@ -197,6 +197,7 @@ report:
     enabled: false
     model: gpt-4.1-mini
     api_key_file: key
-    timeout_sec: 60
-    max_output_tokens: 1200
-    max_slides: 12
+    timeout_sec: 90
+    max_output_tokens: 4000
+    max_slides: 20
+    max_transcript_chars_per_slide: 900
