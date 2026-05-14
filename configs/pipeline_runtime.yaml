@@ -140,8 +140,8 @@ report:
       silence:
         zero_min: 0.0
         full_min: 0.05
-        full_max: 0.40
-        zero_max: 0.70
+        full_max: 0.25
+        zero_max: 0.55
       speech_rate:
         zero_min: 0.5
         full_min: 2.0
