@@ -265,6 +265,7 @@ python -m speechpt.training.ae_probe_infer \
   --audio /path/to/sample.wav \
   --model-dir /tmp/ae_model_lora \
   --model-artifact-s3 s3://aws-s3-speechpt1/pipeline/ae/postprep-20260512-023656/models/pipelines-3qm07layk5io-AE-Train-BoZ9elGx9Q/output/model.tar.gz \
+  --probe-chunk-sec 8 \
   --device cpu
 ```
 
@@ -276,6 +277,7 @@ python -m speechpt.training.ae_probe_infer \
   --model-dir /tmp/ae_model_lora \
   --model-artifact-s3 s3://aws-s3-speechpt1/pipeline/ae/postprep-20260512-023656/models/pipelines-3qm07layk5io-AE-Train-BoZ9elGx9Q/output/model.tar.gz \
   --slide-timestamps 0,40,90,130 \
+  --probe-chunk-sec 8 \
   --device cpu \
   --output-jsonl /tmp/ae_probe_output.jsonl
 ```

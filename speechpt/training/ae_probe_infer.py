@@ -59,7 +59,7 @@ def main() -> None:
     parser.add_argument("--hf-model", default="kresnik/wav2vec2-large-xlsr-korean")
     parser.add_argument("--sample-rate", type=int, default=16000)
     parser.add_argument("--chunk-sec", type=float, default=20.0, help="No timestamp mode only. <=0 means full audio.")
-    parser.add_argument("--probe-chunk-sec", type=float, default=25.0, help="AE probe inference chunk size.")
+    parser.add_argument("--probe-chunk-sec", type=float, default=8.0, help="AE probe inference chunk size.")
     parser.add_argument("--probe-min-chunk-sec", type=float, default=1.0, help="Merge tails shorter than this.")
     parser.add_argument("--device", default="auto", help="auto/cpu/cuda")
     parser.add_argument("--aws-profile", default=None, help="Optional AWS profile for S3 artifact download")

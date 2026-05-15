@@ -231,7 +231,7 @@ def predict_segments(audio_path: str | Path, segments: Sequence[Dict], config: D
     probe_path = resolve_probe_path(config)
     hf_model = str(config.get("hf_model", config.get("model_name", "kresnik/wav2vec2-large-xlsr-korean")))
     sample_rate = int(config.get("sample_rate", 16000))
-    chunk_duration_sec = float(config.get("chunk_duration_sec", 25.0))
+    chunk_duration_sec = float(config.get("chunk_duration_sec", 8.0))
     min_chunk_duration_sec = float(config.get("min_chunk_duration_sec", 1.0))
     device_name = str(config.get("device", "auto"))
     if device_name == "auto":

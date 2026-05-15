@@ -118,7 +118,7 @@ attitude:
     model_artifact_s3: "s3://aws-s3-speechpt1/pipeline/ae/postprep-20260512-023656/models/pipelines-3qm07layk5io-AE-Train-BoZ9elGx9Q/output/model.tar.gz"
     hf_model: "kresnik/wav2vec2-large-xlsr-korean"
     sample_rate: 16000
-    chunk_duration_sec: 25
+    chunk_duration_sec: 8
     min_chunk_duration_sec: 1
     device: auto
     fail_open: false

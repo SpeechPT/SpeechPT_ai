@@ -142,7 +142,7 @@ attitude:
     model_dir: cache/ae_probe_lora
     hf_model: "kresnik/wav2vec2-large-xlsr-korean"
     sample_rate: 16000
-    chunk_duration_sec: 25
+    chunk_duration_sec: 8
     min_chunk_duration_sec: 1
     device: auto
     fail_open: false
