@@ -43,7 +43,10 @@ SYSTEM_PROMPT = """당신은 SpeechPT의 발표 코칭 리포트 작성자입니
 - CE는 슬라이드 핵심 내용과 발화의 정합성 신호입니다. 분석 JSON의 content_connection_score는 사용자 노출용으로 변환된 점수이며, 원본 raw 점수는 제공되지 않습니다. 슬라이드 내용을 모두 설명했는지 채점하는 새 축으로 확장하지 마세요.
 - AE는 발화 속도, 침묵, dwell, 간투사, pitch/energy 변화 신호입니다. 인성/능력/성실성 같은 추정은 금지합니다.
 - VLM/visual/likely_keywords 계열 신호가 있더라도 사용자에게 "말했어야 할 정답 키워드"처럼 단정하지 마세요.
-- alignment.warnings 또는 confidence가 낮으면 정렬이 불확실하다는 점을 반영해 단정적인 표현을 줄이세요.
+- 분석 JSON의 reliability.alignment_level은 분석 신뢰도를 'low'/'medium'/'high' 3단계로 요약한 값입니다. raw confidence 수치는 제공되지 않습니다.
+- reliability.alignment_level이 'low'이면 content_connection_score 숫자(예: 89, 75)를 사용자 문장에 노출하지 마세요. 대신 "분석 신뢰도가 낮아 내용 전달 점수는 참고용으로만 보세요"처럼 정성 표현으로만 다루세요.
+- reliability.alignment_level이 'medium'이면 점수를 언급해도 되지만 "대략의 추정" 뉘앙스를 함께 주세요.
+- reliability.alignment_level이 'high'이면 점수를 일반적으로 다뤄도 됩니다.
 - transcript_segments가 있으면 실제 발화 문장을 근거로 사용하되, 사용자의 의도나 지식을 추정하지 마세요.
 - content_connection_score나 content_connection_label이 낮아도 "발표를 못했다"처럼 단정하지 말고, STT/정렬/표현 차이 가능성을 함께 고려하세요.
 - priority_actions, slide_comments, detailed_report.top_issues는 highlight_sections에 실제로 등장한 issue를 최우선 근거로 삼으세요.
@@ -336,8 +339,24 @@ def _compact_slide_details(report: Dict[str, Any], max_slides: int) -> list[Dict
     return compact
 
 
+def _compact_reliability(report: Dict[str, Any]) -> Dict[str, Any]:
+    reliability = report.get("reliability") or {}
+    if not isinstance(reliability, dict):
+        return {}
+    compact: Dict[str, Any] = {}
+    for key in ("alignment_level", "content_coverage_shown", "warnings", "note"):
+        if key in reliability:
+            compact[key] = reliability[key]
+    return compact
+
+
 def _compact_report(report: Dict[str, Any], max_slides: int = 12, max_transcript_chars: int = 900) -> Dict[str, Any]:
     compact_scores = _compact_overall_scores(report.get("overall_scores", {}))
+    alignment_meta = {
+        key: report.get("alignment", {}).get(key)
+        for key in ("mode", "strategy_used", "warnings")
+        if key in report.get("alignment", {})
+    }
     return {
         "overall_scores": compact_scores,
         "global_summary": _compact_global_summary(report.get("global_summary", {}), compact_scores),
@@ -348,11 +367,8 @@ def _compact_report(report: Dict[str, Any], max_slides: int = 12, max_transcript
             max_slides=max_slides,
             max_chars=max_transcript_chars,
         ),
-        "alignment": {
-            key: report.get("alignment", {}).get(key)
-            for key in ("mode", "strategy_used", "confidence", "warnings")
-            if key in report.get("alignment", {})
-        },
+        "alignment": alignment_meta,
+        "reliability": _compact_reliability(report),
     }
 
 

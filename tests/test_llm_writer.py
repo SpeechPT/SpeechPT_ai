@@ -92,6 +92,12 @@ def test_build_llm_feedback_passes_compact_report_to_prompt():
             }
         ],
         "alignment": {"mode": "auto", "strategy_used": "auto", "confidence": 0.04, "warnings": []},
+        "reliability": {
+            "alignment_level": "medium",
+            "content_coverage_shown": True,
+            "warnings": [],
+            "note": "분석 신뢰도가 보통입니다. 점수는 대략의 추정으로 보세요.",
+        },
     }
 
     feedback = build_llm_feedback(
@@ -118,7 +124,10 @@ def test_build_llm_feedback_passes_compact_report_to_prompt():
     assert "soft_keypoint_coverage" not in slide_detail
     assert "keypoint_coverage" not in slide_detail
     assert "source_coverage" not in slide_detail
-    assert payload["alignment"]["confidence"] == 0.04
+    # raw alignment.confidence MUST NOT reach the LLM — only the 3-level reliability summary.
+    assert "confidence" not in payload["alignment"]
+    assert payload["reliability"]["alignment_level"] == "medium"
+    assert payload["reliability"]["content_coverage_shown"] is True
     assert payload["transcript_segments"][0]["text"] == "이 구간은 실제 발표 대사입니다."
     assert "words" not in payload["transcript_segments"][0]
 

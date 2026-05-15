@@ -16,6 +16,7 @@ import yaml
 from speechpt.attitude.attitude_scorer import SegmentAttitude
 from speechpt.coherence.coherence_scorer import SlideCoherenceResult
 from speechpt.coherence.slide_role_classifier import SlideRole
+from speechpt.report.reliability import compute_alignment_reliability
 from speechpt.report.score_mapping import map_coverage_score
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,7 @@ class SpeechReport:
     alignment: Dict = field(default_factory=dict)
     transcript_segments: List[Dict] = field(default_factory=list)
     llm_feedback: Dict = field(default_factory=dict)
+    reliability: Dict = field(default_factory=dict)
 
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -592,6 +594,12 @@ def generate_report(
     coverage_pct = _coverage_score(ce_results, role_map, report_scoring_cfg)
     coverage_pct_all = _coverage_score_all(ce_results)
     mapping_cfg = report_scoring_cfg.get("content_coverage_user_mapping")
+    alignment_obj = alignment or {}
+    reliability = compute_alignment_reliability(
+        alignment_obj.get("confidence"),
+        alignment_obj.get("warnings", []),
+        report_scoring_cfg.get("alignment_reliability"),
+    )
     overall_scores = {
         "content_coverage": round(coverage_pct, 2),
         "content_coverage_all": round(coverage_pct_all, 2),
@@ -626,6 +634,8 @@ def generate_report(
             if key != "anomaly_fallback"
         },
         "summary_text": summary_template.get("text", ""),
+        "alignment_level": reliability.get("alignment_level"),
+        "content_coverage_shown": reliability.get("content_coverage_shown"),
     }
 
     return SpeechReport(
@@ -636,6 +646,7 @@ def generate_report(
         global_summary=global_summary,
         alignment=alignment or {},
         transcript_segments=list(transcript_segments or []),
+        reliability=reliability,
     )
 
 
