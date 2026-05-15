@@ -62,14 +62,14 @@ def model_fn(model_dir: str) -> Dict[str, Any]:
     # 1. STT — HuggingFace Whisper (가드레일 ②)
     from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
-    stt_processor = WhisperProcessor.from_pretrained("openai/whisper-small")
+    stt_processor = WhisperProcessor.from_pretrained("openai/whisper-large-v3")
     stt_model = WhisperForConditionalGeneration.from_pretrained(
-        "openai/whisper-small",
+        "openai/whisper-large-v3",
         torch_dtype=torch.float16 if device.type == "cuda" else torch.float32,
     ).to(device).eval()
     # 한국어 강제 디코딩
     stt_forced_ids = stt_processor.get_decoder_prompt_ids(language="ko", task="transcribe")
-    logger.info("  ✓ STT (Whisper-small) loaded")
+    logger.info("  ✓ STT (Whisper-large-v3) loaded")
 
     # 2. CE — ko-sroberta
     from sentence_transformers import SentenceTransformer
