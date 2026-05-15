@@ -115,7 +115,10 @@ attitude:
   ae_probe:
     enabled: true
     model_dir: /opt/ml/model
-    model_artifact_s3: "s3://aws-s3-speechpt1/pipeline/ae/postprep-20260512-023656/models/pipelines-3qm07layk5io-AE-Train-BoZ9elGx9Q/output/model.tar.gz"
+    # model_artifact_s3 제거: SageMaker가 model.tar.gz를 read-only로 마운트하므로
+    # _clear_model_files()가 OSError로 죽음. ae_probe.pt + lora_adapter는 이미
+    # SageMaker가 /opt/ml/model 에 풀어주므로 별도 다운로드 불필요.
+    # 학습/dev 환경에서 S3에서 가져와야 한다면 환경변수 또는 별도 yaml로 override.
     hf_model: "kresnik/wav2vec2-large-xlsr-korean"
     sample_rate: 16000
     chunk_duration_sec: 8

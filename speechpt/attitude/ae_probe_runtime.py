@@ -75,14 +75,24 @@ def _is_allowed_artifact_member(name: str) -> bool:
 
 
 def _clear_model_files(model_dir: Path) -> None:
+    """기존 모델 파일 정리. SageMaker처럼 read-only filesystem이면 silently skip."""
     for path in [model_dir / "ae_probe.pt", model_dir / "meta.pt", model_dir / "model.tar.gz"]:
         if path.exists():
-            path.unlink()
+            try:
+                path.unlink()
+            except OSError as exc:
+                # SageMaker는 /opt/ml/model을 read-only로 마운트.
+                # 기존 파일이 우리가 쓰고 싶은 그 파일이면 그대로 사용.
+                logger.warning(f"cannot remove {path} (read-only filesystem?): {exc}")
+                return
     lora_dir = model_dir / "lora_adapter"
     if lora_dir.exists():
         import shutil
 
-        shutil.rmtree(lora_dir)
+        try:
+            shutil.rmtree(lora_dir)
+        except OSError as exc:
+            logger.warning(f"cannot remove {lora_dir} (read-only?): {exc}")
 
 
 def _extract_probe_from_tar(tar_path: Path, model_dir: Path) -> Path:
@@ -123,6 +133,28 @@ def resolve_probe_path(config: Dict) -> Path:
         return _extract_probe_from_tar(tar_path, model_dir)
 
     if artifact_s3:
+        # SageMaker처럼 model_dir이 read-only이면 download/clear 불가.
+        # 이미 probe_path가 풀려있으면 (model.tar.gz extract 결과) 그걸 그대로 사용.
+        try:
+            test_path = model_dir / ".write_test"
+            test_path.touch()
+            test_path.unlink()
+            writable = True
+        except OSError:
+            writable = False
+
+        if not writable:
+            if probe_path.exists():
+                logger.info(
+                    f"model_dir read-only; reusing existing probe at {probe_path} "
+                    f"(skipping download from {artifact_s3})"
+                )
+                return probe_path
+            raise RuntimeError(
+                f"model_dir {model_dir} is read-only and probe_path does not exist. "
+                f"Either bake probe into model.tar.gz or use writable model_dir."
+            )
+
         import boto3
 
         _clear_model_files(model_dir)
