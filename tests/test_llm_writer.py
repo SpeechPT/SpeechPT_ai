@@ -61,10 +61,27 @@ def test_llm_prompt_requires_grounded_actionable_feedback():
 def test_build_llm_feedback_passes_compact_report_to_prompt():
     client = DummyClient()
     report = {
-        "overall_scores": {"content_coverage": 42.0},
-        "global_summary": {"total_slides": 2},
+        "overall_scores": {
+            "content_coverage": 61.19,
+            "content_coverage_all": 57.12,
+            "content_coverage_user": 89.27,
+            "content_coverage_user_all": 86.63,
+            "delivery_stability": 83.37,
+            "pacing_score": 69.88,
+        },
+        "global_summary": {"total_slides": 2, "avg_coverage": 61.19, "avg_coverage_user": 89.27},
         "highlight_sections": [{"slide_id": 2, "issues": ["silence_excess"]}],
-        "per_slide_detail": [{"slide_id": 2, "silence_ratio": 0.35}],
+        "per_slide_detail": [
+            {
+                "slide_id": 2,
+                "coverage": 0.229,
+                "semantic_coverage": 0.4,
+                "soft_keypoint_coverage": 0.1,
+                "keypoint_coverage": 0.0,
+                "source_coverage": {"title": 0.0},
+                "silence_ratio": 0.35,
+            }
+        ],
         "transcript_segments": [
             {
                 "slide_id": 2,
@@ -85,9 +102,22 @@ def test_build_llm_feedback_passes_compact_report_to_prompt():
 
     assert feedback is not None
     assert feedback["priority_actions"][0].startswith("슬라이드 2")
-    assert "content_coverage" in client.user_prompt
     compact_json = client.user_prompt.split("분석 JSON:", 1)[1].strip()
     payload = json.loads(compact_json)
+    assert payload["overall_scores"]["content_connection_score"] == 89.27
+    assert payload["overall_scores"]["content_connection_score_all"] == 86.63
+    assert payload["overall_scores"]["content_connection_label"] == "높음"
+    assert "content_coverage" not in payload["overall_scores"]
+    assert "content_coverage_user" not in payload["overall_scores"]
+    assert payload["global_summary"]["avg_content_connection_score"] == 89.27
+    assert "avg_coverage" not in payload["global_summary"]
+    slide_detail = payload["per_slide_detail"][0]
+    assert slide_detail["content_connection_label"] == "보통"
+    assert "coverage" not in slide_detail
+    assert "semantic_coverage" not in slide_detail
+    assert "soft_keypoint_coverage" not in slide_detail
+    assert "keypoint_coverage" not in slide_detail
+    assert "source_coverage" not in slide_detail
     assert payload["alignment"]["confidence"] == 0.04
     assert payload["transcript_segments"][0]["text"] == "이 구간은 실제 발표 대사입니다."
     assert "words" not in payload["transcript_segments"][0]
